@@ -161,14 +161,17 @@ def sync_canvas():
         logger.info(f"Analyzing {len(all_to_analyze)} assignments in {len(chunks)} batch(es) of up to {BATCH_SIZE}...")
         for batch_num, chunk in enumerate(chunks, start=1):
             logger.info(f"  Batch {batch_num}/{len(chunks)}: {len(chunk)} assignments")
-            # Build syllabus_rules_map for this chunk (course_id -> rules)
+            # Build syllabus_rules_map and course_materials_map for this chunk
             rules_map = {}
+            materials_map = {}
             for a in chunk:
                 cid = str(a["course_id"])
                 if cid not in rules_map:
                     rules_map[cid] = _get_syllabus_rules(cid)
+                if cid not in materials_map:
+                    materials_map[cid] = _get_course_materials(cid)
             try:
-                analyses = analyzer.analyze_assignments_batch(chunk, rules_map)
+                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map)
                 stored = 0
                 for a, analysis in zip(chunk, analyses):
                     if analysis.get("_rate_limited"):
@@ -201,15 +204,20 @@ def sync_canvas():
 
 
 def _sync_syllabi(courses):
+    import re as _re
     for course in courses:
         cid = course["id"]
         cname = course.get("name", "")
         files = canvas_client.get_course_files(cid)
+        ingested_something = False
 
         for f in files:
             fname = f.get("display_name", "")
-            if not canvas_client.is_syllabus_file(fname):
-                continue
+            is_pdf = fname.lower().endswith(".pdf")
+            is_html_text = f.get("content-type", "").startswith("text/")
+            if not (is_pdf or is_html_text):
+                continue  # Only ingest readable files
+
             url = f.get("url") or f.get("download_url", "")
             if not url:
                 continue
@@ -222,28 +230,35 @@ def _sync_syllabi(courses):
             if new_hash == db.get_syllabus_hash(str(cid), fname):
                 continue  # unchanged
 
-            content = syllabus.parse_pdf(raw) if fname.lower().endswith(".pdf") else raw.decode("utf-8", errors="replace")
+            content = syllabus.parse_pdf(raw) if is_pdf else raw.decode("utf-8", errors="replace")
             content = syllabus.truncate_for_llm(content)
             if not content.strip():
                 continue
 
-            logger.info(f"Ingesting syllabus file: {cname} — {fname}")
-            rules = analyzer.extract_syllabus_rules(content, cname)
-            db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
+            is_syl = canvas_client.is_syllabus_file(fname)
+            if is_syl:
+                logger.info(f"Ingesting syllabus: {cname} — {fname}")
+                rules = analyzer.extract_syllabus_rules(content, cname)
+            else:
+                logger.info(f"Ingesting course material: {cname} — {fname}")
+                rules = {}  # Don't run LLM rule extraction on every file — just store content
 
-        # Also ingest Canvas built-in syllabus page (every course has one)
+            db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
+            ingested_something = True
+
+        # Canvas built-in syllabus page
         html_body = canvas_client.get_course_syllabus_body(cid)
         if html_body and html_body.strip():
             fname = "__canvas_syllabus_page__"
             new_hash = syllabus.hash_content(html_body.encode("utf-8"))
             if new_hash != db.get_syllabus_hash(str(cid), fname):
-                import re as _re
                 content = _re.sub(r'<[^>]+>', ' ', html_body)
                 content = syllabus.truncate_for_llm(content)
                 if content.strip():
                     logger.info(f"Ingesting Canvas syllabus page: {cname}")
                     rules = analyzer.extract_syllabus_rules(content, cname)
                     db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
+                    ingested_something = True
 
 
 def _get_syllabus_rules(course_id):
@@ -256,6 +271,22 @@ def _get_syllabus_rules(course_id):
         except Exception:
             pass
     return rules
+
+
+def _get_course_materials(course_id, max_chars=1200):
+    """Return content snippets from non-syllabus course files (e.g. homework PDFs)."""
+    syllabi = db.get_syllabus(str(course_id))
+    snippets = []
+    for s in syllabi:
+        fname = s.get("file_name", "")
+        if fname.startswith("__"):
+            continue  # Skip internal keys
+        if canvas_client.is_syllabus_file(fname):
+            continue  # Syllabus already included via rules
+        content = s.get("content", "")
+        if content and len(content.strip()) > 100:
+            snippets.append(f"[{fname}]\n{content[:500].strip()}")
+    return "\n\n".join(snippets)[:max_chars]
 
 
 def _sync_grades(courses):

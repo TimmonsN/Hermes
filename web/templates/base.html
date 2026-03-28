@@ -173,13 +173,6 @@
       margin-left: auto; padding: 0 4px;
     }
 
-    /* Streak badge */
-    .streak-badge {
-      display: flex; align-items: center; gap: 6px;
-      padding: 8px 20px; color: var(--orange); font-size: 12px; font-weight: 600;
-      border-top: 1px solid var(--border); margin-top: auto;
-    }
-
     /* Card hover animation */
     .card { transition: border-color 0.15s, transform 0.15s; }
     .card:hover { border-color: var(--accent-dim); }
@@ -254,12 +247,6 @@
           Courses
         </a>
       </div>
-      {% if streak > 0 %}
-      <div class="streak-badge">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        {{ streak }}-day streak
-      </div>
-      {% endif %}
     </nav>
     <main class="main">
       {% block content %}{% endblock %}

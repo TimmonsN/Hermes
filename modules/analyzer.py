@@ -250,7 +250,7 @@ Return ONLY valid JSON, no markdown."""
         }
 
 
-def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> list:
+def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None) -> list:
     """Analyze up to 15 assignments in a single API call (Gemini primary, Groq fallback).
 
     Returns list of analysis dicts in the same order as the input assignments.
@@ -275,10 +275,16 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> li
         rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
         rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
         raw_desc = a.get("description") or ""
+        materials = (course_materials_map or {}).get(str(a.get("course_id", "")), "")
         if _is_boilerplate_description(raw_desc):
-            desc = f"[No real description — Canvas submission link only. Infer assignment content from the course name '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your knowledge of this course type.]"
+            if materials:
+                desc = f"[No real Canvas description. Course material files found — use these to understand the assignment:]\n{materials[:600]}"
+            else:
+                desc = f"[No real description — Canvas submission link only. Infer from course name '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your academic knowledge.]"
         else:
             desc = raw_desc[:600]
+            if materials:
+                desc += f"\n\nCourse materials context:\n{materials[:400]}"
 
         lines.append(
             f"--- Assignment {idx + 1} ---\n"
@@ -631,8 +637,29 @@ def generate_chat_response(user_message: str, context: dict) -> str:
 
     syllabus_summary = context.get("syllabus_notes", "")
 
-    prompt = f"""Today: {context.get('current_date', datetime.now().strftime('%Y-%m-%d %A'))}
+    # Build focused assignment block if this is an assignment-specific chat
+    focused_block = ""
+    fa = context.get("focused_assignment")
+    if fa:
+        fa_analysis = fa.get("analysis") or {}
+        focused_block = f"""
+FOCUSED ASSIGNMENT CONTEXT:
+Title: {fa.get('title')}
+Course: {fa.get('course_name')}
+Due: {fa.get('due_at', '')[:10]}
+Points: {fa.get('points_possible')}
+Description: {(fa.get('description') or 'None')[:500]}
+Hermes analysis: difficulty={fa_analysis.get('difficulty')}/10, estimated_hours={fa_analysis.get('estimated_hours')}, priority={fa_analysis.get('priority')}
+Reasoning: {fa_analysis.get('reasoning', '')}
+Study tips: {'; '.join((fa_analysis.get('study_suggestions') or [])[:3])}
+Watch-outs: {'; '.join((fa_analysis.get('watch_outs') or [])[:3])}
+Course materials: {fa.get('course_content', '')[:600]}
 
+Niko is asking specifically about this assignment. Answer directly and specifically — not generic advice.
+"""
+
+    prompt = f"""Today: {context.get('current_date', datetime.now().strftime('%Y-%m-%d %A'))}
+{focused_block}
 Assignments:
 {chr(10).join(assignments_summary) if assignments_summary else 'None.'}
 

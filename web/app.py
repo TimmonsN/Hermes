@@ -22,8 +22,7 @@ logger = logging.getLogger("hermes.web")
 @app.context_processor
 def inject_globals():
     unread = db.get_unread_announcement_count()
-    streak = db.get_completed_days_streak()
-    return dict(unread_announcements=unread, streak=streak)
+    return dict(unread_announcements=unread)
 
 
 def _from_canvas_time(ts: str) -> datetime:
@@ -308,10 +307,10 @@ def calendar_page():
                 continue
             if days_until <= 5:
                 hours = a.get("estimated_hours") or 1.5
-                # Weight by both hours and urgency — priority matters
                 priority_mult = 1.5 if a.get("priority") in ("high", "critical") else 1.0
                 score += (hours / days_until) * priority_mult
-                if days_until <= 3:
+                # Only show as contributor if it's high-stakes and worth starting early
+                if days_until <= 3 and a.get("priority") in ("high", "critical"):
                     contributors.append({
                         "title": a["title"], "days_until": days_until, "type": "assignment"
                     })
@@ -557,6 +556,46 @@ def chat_page():
     return render_template("chat.html", messages=messages)
 
 
+@app.route("/chat/assignment/<assignment_id>")
+def chat_assignment(assignment_id):
+    a = db.get_assignment_by_id(assignment_id)
+    if not a:
+        return redirect("/chat")
+    a = dict(a)
+    a = _enrich_assignment(a)
+
+    # Build Hermes's opening message with full context
+    analysis = {}
+    if a.get("analysis_json"):
+        try:
+            analysis = json.loads(a["analysis_json"])
+        except Exception:
+            pass
+
+    syllabi = db.get_syllabus(str(a.get("course_id", "")))
+    course_notes = ""
+    for s in syllabi[:2]:
+        if s.get("content"):
+            course_notes += s["content"][:600]
+
+    opening = (
+        f"I've got full context on **{a['title']}** ({a.get('course_name', '')}). "
+        f"Due {a.get('due_fmt', 'unknown')}. "
+    )
+    if analysis.get("estimated_hours"):
+        opening += f"I'm estimating ~{analysis['estimated_hours']}h of work. "
+    if analysis.get("reasoning"):
+        opening += f"{analysis['reasoning']} "
+    opening += "What do you want to know or work through?"
+
+    # Pass assignment context for /chat/send to use
+    return render_template("chat.html",
+        messages=[{"body": opening, "direction_class": "hermes", "label": "Hermes", "timestamp": ""}],
+        assignment_context=a,
+        assignment_analysis=analysis,
+    )
+
+
 @app.route("/chat/send", methods=["POST"])
 def chat_send():
     data = request.get_json()
@@ -607,6 +646,25 @@ def chat_send():
             except Exception:
                 pass
 
+    # If this is an assignment-specific chat, load full assignment context
+    focused_assignment = None
+    assignment_id = data.get("assignment_id")
+    if assignment_id:
+        fa = db.get_assignment_by_id(str(assignment_id))
+        if fa:
+            fa = dict(fa)
+            if fa.get("analysis_json"):
+                try:
+                    fa["analysis"] = json.loads(fa["analysis_json"])
+                except Exception:
+                    pass
+            # Include relevant course material content
+            syllabi = db.get_syllabus(str(fa.get("course_id", "")))
+            fa["course_content"] = "\n".join(
+                s.get("content", "")[:800] for s in syllabi[:2] if s.get("content")
+            )
+            focused_assignment = fa
+
     context = {
         "assignments": assignments,
         "exams": db.get_upcoming_exams(days_ahead=30),
@@ -615,6 +673,7 @@ def chat_send():
         "grades": db.get_all_grades()[:10],
         "course_grades": course_grades_list,
         "syllabus_notes": " | ".join(syllabus_notes[:3]),
+        "focused_assignment": focused_assignment,
     }
 
     response = generate_chat_response(user_message, context)
@@ -803,7 +862,7 @@ def set_grade_goal(course_id):
 
 @app.route("/api/course/<course_id>/ignore", methods=["POST"])
 def toggle_course_ignore(course_id):
-    data = request.get_json() or {}
+    data = request.get_json(force=True, silent=True) or {}
     ignored = bool(data.get("ignored", True))
     db.set_course_ignored(course_id, ignored)
     return jsonify({"status": "ok", "ignored": ignored})

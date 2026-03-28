@@ -98,13 +98,13 @@
 {% endblock %}
 
 {% block content %}
-<h1>Grade Tracker</h1>
-<p class="subtitle">Track your grades and stay on target</p>
+<h1>Grades</h1>
+<p class="subtitle">Live from Canvas — syncs with each Canvas update</p>
 
-{% if not course_summaries or course_summaries | selectattr('graded_count') | list | length == 0 %}
+{% if not course_summaries or course_summaries | selectattr('current_avg') | list | length == 0 %}
 <div class="card" style="padding:32px; text-align:center;">
-  <div style="font-size:18px; margin-bottom:8px; color:var(--muted);">No grades entered yet.</div>
-  <div style="font-size:13px; color:var(--muted);">Open any assignment and scroll down to enter your score.</div>
+  <div style="font-size:18px; margin-bottom:8px; color:var(--muted);">No grade data yet.</div>
+  <div style="font-size:13px; color:var(--muted);">Grades sync automatically from Canvas. Trigger a sync to pull the latest.</div>
 </div>
 {% endif %}
 
@@ -121,7 +121,9 @@
         <span class="grade-big" style="color:var(--{{ c.color }})">{{ c.current_avg }}%</span>
         <span class="grade-letter" style="color:var(--{{ c.color }})">{{ c.letter }}</span>
       </div>
-      <div class="grade-meta">{{ c.graded_count }} graded &nbsp;·&nbsp;
+      <div class="grade-meta">
+        {% if c.canvas_grade %}from Canvas{% elif c.graded_count %}{{ c.graded_count }} graded{% endif %}
+        &nbsp;·&nbsp;
         {% if c.on_track %}<span class="on-track">On track for target</span>
         {% else %}<span class="off-track">Below target</span>{% endif %}
       </div>

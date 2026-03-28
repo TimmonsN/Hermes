@@ -146,8 +146,8 @@
         {% if day.contributors %}
           {% for c in day.contributors %}
           <div class="cal-contributor" title="{{ c.title }}">
-            {% if c.type == 'exam' %}★{% else %}→{% endif %}
-            study {{ c.title[:18] }}{% if c.title|length > 18 %}…{% endif %}
+            {% if c.type == 'exam' %}★ study{% else %}→ start{% endif %}
+            {{ c.title[:16] }}{% if c.title|length > 16 %}…{% endif %}
           </div>
           {% endfor %}
         {% else %}
