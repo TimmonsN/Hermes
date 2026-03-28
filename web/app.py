@@ -812,21 +812,6 @@ def grades_page():
     )
 
 
-@app.route("/api/grade/<assignment_id>", methods=["POST"])
-def enter_grade(assignment_id):
-    data = request.get_json()
-    points_earned = float(data.get("points_earned", 0))
-    points_possible = float(data.get("points_possible", 100))
-    a = db.get_assignment_by_id(assignment_id)
-    course_id = a["course_id"] if a else ""
-    grade_pct = db.upsert_grade(assignment_id, course_id, points_earned, points_possible)
-    return jsonify({"status": "ok", "grade_pct": grade_pct, "letter": _letter_grade(grade_pct)})
-
-
-@app.route("/api/grade/<assignment_id>", methods=["DELETE"])
-def delete_grade(assignment_id):
-    db.delete_grade(assignment_id)
-    return jsonify({"status": "ok"})
 
 
 @app.route("/api/grade-goal/<course_id>", methods=["POST"])
@@ -1082,10 +1067,6 @@ def log_time(assignment_id):
     return jsonify({"status": "ok", "total_minutes": total})
 
 
-@app.route("/api/assignment/<assignment_id>/bulk-done", methods=["POST"])
-def bulk_mark_done(assignment_id):
-    db.update_assignment_status(assignment_id, "submitted")
-    return jsonify({"status": "ok"})
 
 
 def run(port=5000, debug=False, use_reloader=True):

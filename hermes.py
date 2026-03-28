@@ -20,29 +20,32 @@ from apscheduler.triggers.cron import CronTrigger
 from config import Config
 import database as db
 from modules import canvas_client, analyzer, syllabus
+from modules.scheduler_engine import (
+    should_send_start_reminder, should_send_check_in,
+    is_within_active_hours, get_early_bonus_window
+)
 
+# Assignment title keywords for exam detection
 EXAM_KEYWORDS = ["exam", "midterm", "final"]
 EXAM_EXCLUSIONS = ["practice", "review", "prep", "sample", "example", "study guide"]
 
+
 def _looks_like_exam(title: str) -> bool:
+    """True if an assignment title looks like an actual exam (not a practice/review)."""
     t = title.lower()
     if any(ex in t for ex in EXAM_EXCLUSIONS):
         return False
     return any(kw in t for kw in EXAM_KEYWORDS)
 
+
 def _is_default_analysis(analysis_json: str) -> bool:
-    """Return True if stored analysis looks like it used fallback defaults."""
+    """True if stored analysis is just the error fallback defaults (difficulty=5, hours=2.0).
+    Used to identify assignments that need to be re-analyzed with real AI output."""
     try:
         a = json.loads(analysis_json)
         return a.get("difficulty") == 5 and a.get("estimated_hours") == 2.0
     except Exception:
         return False
-
-
-from modules.scheduler_engine import (
-    should_send_start_reminder, should_send_check_in,
-    is_within_active_hours, get_early_bonus_window
-)
 
 # --- Logging ---
 logging.basicConfig(
@@ -236,8 +239,6 @@ def _sync_syllabi(courses):
         logger.info(f"Checking files for {cname} (course {cid})...")
         files = canvas_client.get_course_files(cid)
         logger.info(f"  {cname}: found {len(files)} files total")
-        ingested_something = False
-
         for f in files:
             fname = f.get("display_name", "")
             is_pdf = fname.lower().endswith(".pdf")
@@ -271,7 +272,6 @@ def _sync_syllabi(courses):
                 rules = {}  # Don't run LLM rule extraction on every file — just store content
 
             db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
-            ingested_something = True
 
         # Canvas built-in syllabus page
         html_body = canvas_client.get_course_syllabus_body(cid)
@@ -285,7 +285,6 @@ def _sync_syllabi(courses):
                     logger.info(f"Ingesting Canvas syllabus page: {cname}")
                     rules = analyzer.extract_syllabus_rules(content, cname)
                     db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
-                    ingested_something = True
 
 
 def _get_syllabus_rules(course_id):
@@ -317,7 +316,15 @@ def _get_course_materials(course_id, max_chars=1200):
 
 
 def _sync_course_notes(courses):
-    """Generate and store strategic course notes for each course using syllabus + grade data."""
+    """Hermes's learn-and-grow mechanism.
+
+    After each sync, generate a dense strategic summary per course (grading weights,
+    assignment patterns, what causes point deductions, etc.) and store it in the DB.
+    These notes are then injected into every future batch analysis and chat prompt,
+    so Hermes gets smarter about each course over time as more data arrives.
+
+    Notes are only regenerated if there's new syllabus/grade data to learn from.
+    """
     for course in courses:
         cid = str(course["id"])
         cname = course.get("name", "")

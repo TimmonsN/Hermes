@@ -241,12 +241,6 @@ def get_course_notes(course_id: str) -> str:
     conn.close()
     return row["course_notes"] if row and row["course_notes"] else ""
 
-def set_course_piazza(course_id, nid):
-    conn = get_conn()
-    conn.execute("UPDATE courses SET piazza_nid=? WHERE id=?", (nid, str(course_id)))
-    conn.commit()
-    conn.close()
-
 # --- Syllabi ---
 
 def upsert_syllabus(course_id, file_name, file_hash, content, rules_json):
@@ -503,29 +497,6 @@ def get_recent_messages(limit=20):
     conn.close()
     return list(reversed([dict(r) for r in rows]))
 
-def message_already_processed(twilio_sid):
-    conn = get_conn()
-    row = conn.execute("SELECT id FROM messages WHERE twilio_sid=?", (twilio_sid,)).fetchone()
-    conn.close()
-    return row is not None
-
-# --- Time Logs ---
-
-def log_time(assignment_id, started_at, ended_at, actual_hours):
-    conn = get_conn()
-    conn.execute("""
-        INSERT INTO time_logs (assignment_id, started_at, ended_at, actual_hours)
-        VALUES (?, ?, ?, ?)
-    """, (assignment_id, started_at, ended_at, actual_hours))
-    conn.commit()
-    conn.close()
-
-def get_time_logs_for_assignment(assignment_id):
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM time_logs WHERE assignment_id=?", (assignment_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
 # --- Preferences ---
 
 def get_pref(key, default=None):
@@ -781,39 +752,6 @@ def get_study_plan():
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
-def get_completed_days_streak():
-    """Return consecutive days with at least one assignment marked submitted/complete."""
-    from datetime import date, timedelta
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT DATE(updated_at) as day
-        FROM assignments
-        WHERE status IN ('submitted', 'complete')
-        GROUP BY DATE(updated_at)
-        ORDER BY day DESC
-    """).fetchall()
-    conn.close()
-    days = [r["day"] for r in rows]
-    if not days:
-        return 0
-    streak = 0
-    check = date.today()
-    for d in days:
-        try:
-            d_date = datetime.strptime(d, "%Y-%m-%d").date() if isinstance(d, str) else d
-        except Exception:
-            continue
-        if d_date == check:
-            streak += 1
-            check = check - timedelta(days=1)
-        elif d_date == check + timedelta(days=1) and streak == 0:
-            # Allow streak starting yesterday
-            streak += 1
-            check = d_date - timedelta(days=1)
-        else:
-            break
-    return streak
 
 # --- API Usage Tracking ---
 
