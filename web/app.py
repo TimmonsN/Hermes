@@ -12,7 +12,7 @@ EASTERN = ZoneInfo("America/New_York")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import database as db
-from modules.analyzer import generate_chat_response
+from modules.analyzer import generate_chat_response, _is_boilerplate_description
 from modules.scheduler_engine import should_send_start_reminder
 
 app = Flask(__name__)
@@ -146,19 +146,26 @@ def dashboard():
 
     upcoming_exams = [e for e in exams if e.get("start_at")]
 
-    # Quick collision check from DB (no new API call)
+    # Collision alerts: only flag genuinely brutal stacking.
+    # Require 3+ high-priority items OR combined hours ≥ 8h within a 36-hour window.
     collision_alerts = []
-    # Check if any high-priority items are within 2 days of each other
     high_items = [a for a in assignments if a.get("priority") in ("high", "critical") and a.get("due_dt")]
     for i, a in enumerate(high_items):
+        window_items = [a]
+        window_hours = a.get("estimated_hours") or 2.0
         for b in high_items[i+1:]:
             diff = abs((a["due_dt"] - b["due_dt"]).total_seconds()) / 3600
-            if diff <= 48:
-                collision_alerts.append({
-                    "window": f"{a['due_dt'].strftime('%b %d')}–{b['due_dt'].strftime('%b %d')}",
-                    "advice": f"{a['title']} and {b['title']} are both due within 48 hours — plan ahead."
-                })
-                break
+            if diff <= 36:
+                window_items.append(b)
+                window_hours += b.get("estimated_hours") or 2.0
+        # Only flag if it's a genuinely big crunch
+        if len(window_items) >= 3 or (len(window_items) >= 2 and window_hours >= 8):
+            titles = " + ".join(x["title"][:30] for x in window_items[:3])
+            collision_alerts.append({
+                "window": a["due_dt"].strftime("%b %d"),
+                "advice": f"~{round(window_hours, 1)}h of work stacked around {a['due_dt'].strftime('%a %b %d')}: {titles}. Start early."
+            })
+            break  # only show one collision alert on dashboard
 
     # Time totals
     today_hours = sum(a.get("estimated_hours") or 0 for a in due_today)
@@ -273,33 +280,27 @@ def calendar_page():
 
     today = now.date()
 
-    # Heatmap: pressure score for a day = sum of (hours / max(days_until_due, 0.5))
-    # for assignments due ON OR AFTER target_date, within 7 days ahead.
-    # Only count future/today assignments — not overdue ones — to avoid phantom pressure.
+    # Heatmap: total estimated hours of work due ON this specific day.
+    # Color reflects how loaded that calendar day is, not pressure from future deadlines.
     def _heatmap_intensity(target_date):
         score = 0.0
         for a in assignments:
             if not a.get("due_dt"):
                 continue
-            due_date = a["due_dt"].date()
-            if due_date < target_date:
-                continue  # skip overdue — don't inflate past/present intensity
-            days_until = max((due_date - target_date).days, 0.5)
-            if days_until <= 7:
-                # Fall back to 2h when Gemini hasn't analyzed yet
-                hours = a.get("estimated_hours") or 2.0
-                score += hours / days_until
+            if a["due_dt"].date() == target_date:
+                hours = a.get("estimated_hours") or 1.5
+                score += hours
         return round(score, 2)
 
     def _heatmap_level(intensity):
-        """Returns (css_class, height_px) — height scales proportionally to intensity."""
+        """Returns (css_class, height_px) based on total hours due that day."""
         if intensity <= 0:
             return "heat-none", 4
-        elif intensity < 1.0:
+        elif intensity < 2.0:
             return "heat-light", 6
-        elif intensity < 3.0:
+        elif intensity < 5.0:
             return "heat-moderate", 10
-        elif intensity < 6.0:
+        elif intensity < 8.0:
             return "heat-heavy", 16
         else:
             return "heat-overwhelming", 22
@@ -403,12 +404,15 @@ def assignment_detail(assignment_id):
             except Exception:
                 pass
 
-    # Current course grade (for GPA impact)
+    # Current course grade
     course_grades = db.get_grades_for_course(a.get("course_id", "")) if a.get("course_id") else []
     current_avg = None
     if course_grades:
         valid = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
         current_avg = round(sum(valid) / len(valid), 1) if valid else None
+
+    # Flag if Canvas gave us a useless description so the UI can show a note
+    description_inferred = _is_boilerplate_description(a.get("description", ""))
 
     return render_template(
         "assignment_detail.html",
@@ -425,6 +429,7 @@ def assignment_detail(assignment_id):
         grade_obj=grade_obj,
         syllabus_weights=syllabus_weights,
         current_avg=current_avg,
+        description_inferred=description_inferred,
     )
 
 

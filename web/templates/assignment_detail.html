@@ -234,30 +234,10 @@
     font-size: 18px;
     font-weight: 700;
   }
-  /* GPA Impact slider */
-  .gpa-slider {
-    width: 100%;
-    accent-color: var(--accent);
-    margin: 12px 0;
-  }
-  .gpa-impact-display {
-    font-size: 28px;
-    font-weight: 700;
-    text-align: center;
-    margin: 8px 0;
-  }
   .gpa-meta {
-    text-align: center;
     color: var(--muted);
     font-size: 13px;
     margin-bottom: 8px;
-  }
-  .slider-labels {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: -8px;
   }
 </style>
 {% endblock %}
@@ -395,29 +375,48 @@
   </div>
 </div>
 
-<!-- GPA Impact Calculator -->
+<!-- Grade Targets -->
 {% if a.points_possible %}
 <div class="info-block">
-  <h3>GPA Impact Calculator</h3>
-  {% if current_avg is not none %}
-  <div class="gpa-meta">Current course avg: <strong>{{ current_avg }}%</strong></div>
-  {% else %}
-  <div class="gpa-meta" style="color:var(--muted);">Enter grades in Courses to see real impact. Showing hypothetical.</div>
-  {% endif %}
-  <div class="gpa-meta">Drag to see how your score on this {{ a.points_possible }}-pt assignment affects your grade:</div>
-  <input class="gpa-slider" type="range" min="0" max="100" value="{{ grade_obj.grade_pct | int if grade_obj else 80 }}" id="gpaSlider" oninput="updateGpaImpact(this.value)" />
-  <div class="slider-labels"><span>0%</span><span>50%</span><span>100%</span></div>
-  <div class="gpa-impact-display" id="gpaDisplay">
-    <span id="gpaScore">{{ grade_obj.grade_pct | round(1) if grade_obj else 80 }}%</span>
-    <span style="color:var(--muted); font-size:18px; margin:0 8px;">on this assignment →</span>
-    <span id="gpaCourseAvg" style="color:var(--accent);">calculating...</span>
+  <h3>Score Targets</h3>
+  <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+    {% set pts = a.points_possible %}
+    {% for label, threshold in [('A (90%+)', 0.90), ('B (80%)', 0.80), ('C (70%)', 0.70)] %}
+    <div style="background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 16px; text-align:center; flex:1; min-width:100px;">
+      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">{{ label }}</div>
+      <div style="font-size:18px; font-weight:700; color:{% if loop.index == 1 %}var(--green){% elif loop.index == 2 %}var(--yellow){% else %}var(--orange){% endif %};">
+        {{ (pts * threshold) | round | int }}+ pts
+      </div>
+    </div>
+    {% endfor %}
   </div>
-  <div style="text-align:center; font-size:16px; font-weight:600; color:var(--muted);" id="gpaLetter"></div>
+  {% if current_avg is not none and syllabus_weights %}
+  <div style="font-size:12px; color:var(--muted);">
+    Current course avg: <strong style="color:var(--text);">{{ current_avg }}%</strong>
+    — keep scoring 90%+ on remaining work to protect that average.
+  </div>
+  {% elif current_avg is not none %}
+  <div style="font-size:12px; color:var(--muted);">
+    Your current course avg is <strong style="color:var(--text);">{{ current_avg }}%</strong>.
+    Score at least <strong style="color:var(--text);">{{ (a.points_possible * 0.90) | round | int }} pts</strong> here to stay on track for an A.
+  </div>
+  {% else %}
+  <div style="font-size:12px; color:var(--muted);">
+    Enter grades on this page to track your course average and stay on target.
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 
 <!-- Description -->
-{% if a.description %}
+{% if description_inferred %}
+<div class="info-block" style="border-color: rgba(124,108,255,0.25);">
+  <h3>Description</h3>
+  <div style="font-size:12px; color:var(--accent); margin-bottom:8px;">
+    ℹ Canvas provided no real description — Hermes inferred this analysis from the course name and assignment title.
+  </div>
+</div>
+{% elif a.description %}
 <div class="info-block">
   <h3>Description</h3>
   <div class="description-content">
@@ -430,35 +429,34 @@
 </div>
 {% endif %}
 
-<!-- Study suggestions -->
-{% if study_suggestions %}
+<!-- Hermes Analysis (shown for all analyzed assignments) -->
+{% if reasoning or study_suggestions or watch_outs %}
 <div class="info-block">
-  <h3>Study Suggestions</h3>
-  <ul class="suggestion-list">
+  <h3>Hermes Analysis</h3>
+  {% if reasoning %}
+  <p class="reasoning-text" style="margin-bottom: {% if study_suggestions or watch_outs %}14px{% else %}0{% endif %};">{{ reasoning }}</p>
+  {% endif %}
+  {% if study_suggestions %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">How to approach it</div>
+  <ul class="suggestion-list" style="margin-bottom: {% if watch_outs %}14px{% else %}0{% endif %};">
     {% for tip in study_suggestions %}
     <li>{{ tip }}</li>
     {% endfor %}
   </ul>
-</div>
-{% endif %}
-
-<!-- Watch-outs -->
-{% if watch_outs %}
-<div class="info-block">
-  <h3>Watch Out For</h3>
+  {% endif %}
+  {% if watch_outs %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Watch out for</div>
   <ul class="suggestion-list watchout-list">
     {% for w in watch_outs %}
     <li>{{ w }}</li>
     {% endfor %}
   </ul>
+  {% endif %}
 </div>
-{% endif %}
-
-<!-- AI Reasoning -->
-{% if reasoning %}
-<div class="info-block">
-  <h3>Hermes Reasoning</h3>
-  <p class="reasoning-text">{{ reasoning }}</p>
+{% elif not a.analysis_json %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.15);">
+  <h3>Hermes Analysis</h3>
+  <p style="font-size:13px; color:var(--muted);">Analysis pending — Hermes will analyze this during the next sync (2pm / 8pm).</p>
 </div>
 {% endif %}
 
@@ -518,8 +516,6 @@
 
 <script>
 const assignmentId = '{{ a.id }}';
-const pointsPossible = {{ a.points_possible or 100 }};
-const currentAvg = {{ current_avg if current_avg is not none else 'null' }};
 
 async function markDone(id, btn) {
   await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
@@ -555,7 +551,6 @@ async function saveGrade(id) {
   el.textContent = pct.toFixed(1) + '%';
   el.style.display = 'block';
   el.style.color = pct >= 90 ? 'var(--green)' : pct >= 80 ? 'var(--yellow)' : 'var(--red)';
-  updateGpaImpact(pct);
 }
 
 async function deleteGrade(id) {
@@ -563,7 +558,7 @@ async function deleteGrade(id) {
   location.reload();
 }
 
-// GPA Impact calculator
+// Grade save still needs letter grade for display
 function letterGrade(pct) {
   if (pct >= 93) return 'A';
   if (pct >= 90) return 'A-';
@@ -576,41 +571,6 @@ function letterGrade(pct) {
   if (pct >= 60) return 'D';
   return 'F';
 }
-
-function gradeColor(pct) {
-  if (pct >= 90) return 'var(--green)';
-  if (pct >= 80) return 'var(--yellow)';
-  return 'var(--red)';
-}
-
-function updateGpaImpact(scorePct) {
-  scorePct = parseFloat(scorePct);
-  document.getElementById('gpaScore').textContent = scorePct.toFixed(0) + '%';
-  // Simple: if we have currentAvg, show how this assignment shifts it
-  // Just show the score itself and its letter grade as the primary signal
-  const el = document.getElementById('gpaCourseAvg');
-  const letter = letterGrade(scorePct);
-  const color = gradeColor(scorePct);
-
-  if (currentAvg !== null) {
-    // Assume this assignment is ~10% of grade for simplification (no weight data in JS)
-    const weight = 0.10;
-    const projected = currentAvg * (1 - weight) + scorePct * weight;
-    el.textContent = projected.toFixed(1) + '% course avg';
-    el.style.color = color;
-    document.getElementById('gpaLetter').textContent = `${letter} on this assignment (${letterGrade(projected)} course)`;
-  } else {
-    el.textContent = letter + ' on this assignment';
-    el.style.color = color;
-    document.getElementById('gpaLetter').textContent = scorePct.toFixed(0) + '%';
-  }
-}
-
-// Initialize slider
-window.addEventListener('DOMContentLoaded', () => {
-  const slider = document.getElementById('gpaSlider');
-  if (slider) updateGpaImpact(slider.value);
-});
 
 // Notes
 let saveTimer;

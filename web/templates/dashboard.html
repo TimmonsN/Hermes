@@ -78,7 +78,7 @@ async function reanalyze() {
   <div class="card" id="card-{{ a.id }}" style="border-left: 3px solid var(--red);">
     <div class="card-header">
       <div>
-        <div class="card-title">{{ a.title }}</div>
+        <div class="card-title"><a href="/assignments/{{ a.id }}" style="color:inherit;text-decoration:none;">{{ a.title }}</a></div>
         <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}</div>
       </div>
       <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
@@ -114,7 +114,7 @@ async function reanalyze() {
   <div class="card" id="card-{{ a.id }}">
     <div class="card-header">
       <div>
-        <div class="card-title">{{ a.title }}</div>
+        <div class="card-title"><a href="/assignments/{{ a.id }}" style="color:inherit;text-decoration:none;">{{ a.title }}</a></div>
         <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}{% if a.start_by_fmt %} &nbsp;·&nbsp; <span style="color:var(--accent)">Start {{ a.start_by_fmt }}</span>{% endif %}</div>
       </div>
       <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
@@ -170,11 +170,13 @@ async function reanalyze() {
   <div class="card" style="padding:12px 20px;">
     {% for a in coming_up %}
     <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
-      <div>
-        <span style="font-weight:500;">{{ a.title }}</span>
-        <span style="color:var(--muted); margin-left:8px; font-size:12px;">{{ a.course_name }}</span>
-      </div>
-      <span style="color:var(--muted); font-size:12px;">{{ a.due_fmt }}</span>
+      <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; display:contents;">
+        <div>
+          <span style="font-weight:500;">{{ a.title }}</span>
+          <span style="color:var(--muted); margin-left:8px; font-size:12px;">{{ a.course_name }}</span>
+        </div>
+        <span style="color:var(--muted); font-size:12px;">{{ a.due_fmt }}</span>
+      </a>
     </div>
     {% endfor %}
   </div>

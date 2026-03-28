@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from google import genai
@@ -11,6 +12,31 @@ logger = logging.getLogger("hermes.analyzer")
 
 _gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
 _groq_client = None
+
+# Phrases that indicate a Canvas submission placeholder, not a real description
+_BOILERPLATE_PHRASES = [
+    "please use this to submit",
+    "use this assignment to submit",
+    "use this to submit",
+    "submit your completed",
+    "submit your assignment",
+    "assignment submission",
+    "submit here",
+    "upload your",
+    "submit via",
+    "this is where you",
+]
+
+def _is_boilerplate_description(description: str) -> bool:
+    """Return True if the description is a Canvas submission placeholder, not real content."""
+    if not description:
+        return True
+    clean = re.sub(r'<[^>]+>', ' ', description)
+    clean = re.sub(r'&\w+;', ' ', clean)
+    clean = re.sub(r'\s+', ' ', clean).strip().lower()
+    if len(clean) < 40:
+        return True
+    return any(phrase in clean for phrase in _BOILERPLATE_PHRASES)
 
 
 def _get_groq_client():
@@ -242,7 +268,11 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> li
 
         rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
         rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
-        desc = (a.get("description") or "No description provided.")[:600]
+        raw_desc = a.get("description") or ""
+        if _is_boilerplate_description(raw_desc):
+            desc = f"[No real description — Canvas submission link only. Infer assignment content from the course name '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your knowledge of this course type.]"
+        else:
+            desc = raw_desc[:600]
 
         lines.append(
             f"--- Assignment {idx + 1} ---\n"
@@ -257,7 +287,7 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> li
 
     batch_text = "\n\n".join(lines)
 
-    prompt = f"""You are analyzing assignments for Niko, a college student at Ohio State University who tends to procrastinate and often starts things the day they are due. Your job is to give brutally honest, actionable analysis so he can get A grades.
+    prompt = f"""You are Hermes, analyzing assignments for Niko, a college student at Ohio State University. He tends to procrastinate, but he's capable — your job is to give accurate, actionable analysis so he can get A grades.
 
 Analyze each of the following {len(assignments)} assignments and return a JSON array.
 
@@ -266,8 +296,8 @@ Analyze each of the following {len(assignments)} assignments and return a JSON a
 Return a JSON array with exactly {len(assignments)} objects in the same order as the assignments above.
 Each object must have these fields:
 {{
-  "difficulty": 1-10 (be honest — a 3000-word essay is at least a 7),
-  "estimated_hours": float (realistic total including research, drafting, editing/debugging),
+  "difficulty": 1-10 (honest — a 3000-word essay is 7+, a short worksheet is 2-3),
+  "estimated_hours": float (realistic wall-clock time including research, drafting, editing/debugging),
   "time_breakdown": {{"research": float, "writing_or_coding": float, "review": float}},
   "assignment_type": "essay|coding|problem_set|reading|quiz|project|discussion|lab|other",
   "priority": "low|medium|high|critical",
@@ -275,19 +305,20 @@ Each object must have these fields:
   "early_bonus_details": "description or empty string",
   "can_resubmit": true/false,
   "resubmit_details": "description or empty string",
-  "recommended_days_before_due": integer (minimum days ahead Niko should START, given his procrastination habit),
-  "study_suggestions": ["3-5 specific, actionable strategies for THIS assignment type", "e.g. for essays: outline first before writing", "for coding: test edge cases early"],
-  "watch_outs": ["2-4 specific traps or failure modes for this assignment", "e.g. don't forget to cite sources", "the rubric penalizes off-topic responses"],
+  "recommended_days_before_due": integer (days ahead Niko should START — be realistic, not alarmist),
+  "study_suggestions": ["3-5 specific, actionable strategies for THIS assignment type"],
+  "watch_outs": ["2-4 specific traps or failure modes for this assignment"],
   "course_strategy_note": "one sentence on how this fits into the course grade",
-  "reasoning": "2-3 sentences on difficulty rating and time estimate"
+  "reasoning": "2-3 calm, factual sentences explaining difficulty and time estimate"
 }}
 
-Critical rules:
-- study_suggestions must be SPECIFIC to the assignment type, not generic advice
-- watch_outs must be things that commonly cause students to lose points on THIS type of work
-- If the assignment involves Canvas submission or a specific format, call that out in watch_outs
-- Consider the syllabus grading weights when setting priority
-- Niko procrastinates — recommended_days_before_due should account for his tendency to start late
+TONE RULES — strictly enforced:
+- reasoning must be factual and calm. Never use ALL CAPS, never say "drop everything", never be melodramatic.
+- Match urgency to actual timeline: 3+ days and < 3h of work = low urgency, matter-of-fact tone.
+- "critical" priority is reserved for things due within 24h OR exams/finals. Use "high" for due-in-3-days.
+- If description says "[No real description]", infer from course name + title using your academic knowledge.
+- study_suggestions must be SPECIFIC to this assignment type, not generic ("read the rubric" is not useful).
+- watch_outs must be things that commonly cause point deductions on THIS specific type of work.
 
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
