@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %} — Assignments{% endblock %}
+
+{% block content %}
+<h1>Assignments</h1>
+<p class="subtitle">{{ total }} upcoming &nbsp;·&nbsp; sorted by due date</p>
+
+{% if not assignments %}
+<div class="card" style="text-align:center; padding:48px; color:var(--muted);">
+  No upcoming assignments found. Hermes will sync from Canvas automatically.
+</div>
+{% else %}
+<div class="card" style="padding:0; overflow:hidden;">
+  <table>
+    <thead>
+      <tr>
+        <th>Assignment</th>
+        <th>Course</th>
+        <th>Due</th>
+        <th>Priority</th>
+        <th>Difficulty</th>
+        <th>Est. Time</th>
+        <th>Start By</th>
+        <th>Flags</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in assignments %}
+      <tr>
+        <td>
+          <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ a.title }}</a>
+        </td>
+        <td style="color:var(--muted);">{{ a.course_name }}</td>
+        <td class="{{ a.due_class }}">{{ a.due_fmt }}</td>
+        <td><span class="badge badge-{{ a.priority }}">{{ a.priority }}</span></td>
+        <td>
+          {% if a.difficulty %}
+          <div class="diff-dots">
+            {% for i in range(1, 11) %}
+            <div class="diff-dot {% if i <= a.difficulty %}{% if a.difficulty >= 8 %}critical{% elif a.difficulty >= 6 %}high{% else %}filled{% endif %}{% endif %}"></div>
+            {% endfor %}
+          </div>
+          {% else %}—{% endif %}
+        </td>
+        <td style="color:var(--muted);">{% if a.estimated_hours %}~{{ a.estimated_hours }}h{% else %}—{% endif %}</td>
+        <td style="color:var(--accent); font-size:12px;">{{ a.start_by_fmt or '—' }}</td>
+        <td>
+          {% if a.has_early_bonus %}<span class="tag tag-bonus">bonus</span>{% endif %}
+          {% if a.can_resubmit %}<span class="tag tag-bonus">resub</span>{% endif %}
+          {% if not a.difficulty %}<span class="tag">analyzing...</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

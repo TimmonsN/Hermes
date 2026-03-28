@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %} — Chat{% endblock %}
+
+{% block head %}
+<style>
+  .chat-container { display: flex; flex-direction: column; height: calc(100vh - 120px); }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 0 0 16px; display: flex; flex-direction: column; gap: 12px; }
+  .chat-input-area { display: flex; gap: 10px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .chat-input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px;
+    outline: none; resize: none; font-family: inherit; line-height: 1.5;
+  }
+  .chat-input:focus { border-color: var(--accent); }
+  .msg { max-width: 75%; }
+  .msg-user { align-self: flex-end; }
+  .msg-hermes { align-self: flex-start; }
+  .msg-bubble {
+    padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap;
+  }
+  .msg-user .msg-bubble { background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+  .msg-hermes .msg-bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .msg-user .msg-label { text-align: right; }
+  .typing { color: var(--muted); font-size: 13px; padding: 8px 14px; }
+  .dot-pulse { display: inline-flex; gap: 4px; }
+  .dot-pulse span { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: pulse 1.2s infinite; }
+  .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+  .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes pulse { 0%,60%,100%{opacity:0.3} 30%{opacity:1} }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Chat with Hermes</h1>
+<p class="subtitle">Ask about assignments, get help, give status updates. Hermes knows your full schedule.</p>
+
+<div class="chat-container">
+  <div class="chat-messages" id="messages">
+    {% for msg in messages %}
+    <div class="msg msg-{{ msg.direction_class }}">
+      <div class="msg-label">{{ msg.label }}</div>
+      <div class="msg-bubble">{{ msg.body }}</div>
+    </div>
+    {% endfor %}
+
+    {% if not messages %}
+    <div class="msg msg-hermes">
+      <div class="msg-label">Hermes</div>
+      <div class="msg-bubble">Hey Niko — I'm Hermes. Ask me about your assignments, tell me what you're working on, or ask for help with anything. What's up?</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="chat-input-area">
+    <textarea class="chat-input" id="msgInput" rows="1" placeholder="Ask Hermes anything..." onkeydown="handleKey(event)"></textarea>
+    <button class="btn btn-primary" onclick="sendMessage()" id="sendBtn">Send</button>
+  </div>
+</div>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const input = document.getElementById('msgInput');
+  const sendBtn = document.getElementById('sendBtn');
+
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  scrollBottom();
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  // Auto-resize textarea
+  input.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+  });
+
+  function appendMsg(direction, body) {
+    const div = document.createElement('div');
+    div.className = `msg msg-${direction === 'user' ? 'user' : 'hermes'}`;
+    const label = document.createElement('div');
+    label.className = 'msg-label';
+    label.textContent = direction === 'user' ? 'You' : 'Hermes';
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = body;
+    div.appendChild(label);
+    div.appendChild(bubble);
+    messagesEl.appendChild(div);
+    scrollBottom();
+    return div;
+  }
+
+  function showTyping() {
+    const div = document.createElement('div');
+    div.className = 'msg msg-hermes';
+    div.id = 'typing-indicator';
+    div.innerHTML = '<div class="msg-bubble typing"><div class="dot-pulse"><span></span><span></span><span></span></div></div>';
+    messagesEl.appendChild(div);
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById('typing-indicator');
+    if (t) t.remove();
+  }
+
+  async function sendMessage() {
+    const body = input.value.trim();
+    if (!body) return;
+
+    input.value = '';
+    input.style.height = 'auto';
+    sendBtn.disabled = true;
+
+    appendMsg('user', body);
+    showTyping();
+
+    try {
+      const res = await fetch('/chat/send', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: body})
+      });
+      const data = await res.json();
+      removeTyping();
+      appendMsg('hermes', data.response);
+    } catch (err) {
+      removeTyping();
+      appendMsg('hermes', 'Something went wrong. Try again.');
+    }
+
+    sendBtn.disabled = false;
+    input.focus();
+  }
+</script>
+{% endblock %}

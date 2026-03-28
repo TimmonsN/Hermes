@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %} — Dashboard{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
+  <h1>Good {{ greeting }}, Niko.</h1>
+  <div style="display:flex; gap:8px;">
+    <button class="btn btn-ghost" onclick="triggerSync()" style="font-size:12px;" id="syncBtn">Sync Canvas</button>
+    <button class="btn btn-ghost" onclick="reanalyze()" style="font-size:12px;" id="reanalyzeBtn">Re-analyze All</button>
+  </div>
+</div>
+<p class="subtitle">
+  {{ today_str }} &nbsp;·&nbsp; {{ active_courses }} active courses &nbsp;·&nbsp; {{ total_upcoming }} upcoming
+  {% if today_hours %}&nbsp;·&nbsp; <span style="color:var(--accent)">~{{ today_hours }}h due today</span>{% endif %}
+  {% if week_hours %}&nbsp;·&nbsp; ~{{ week_hours }}h this week{% endif %}
+</p>
+
+<script>
+async function triggerSync() {
+  document.getElementById('syncBtn').textContent = 'Syncing...';
+  await fetch('/api/sync', {method:'POST'});
+  setTimeout(() => { document.getElementById('syncBtn').textContent = 'Sync Canvas'; location.reload(); }, 5000);
+}
+async function reanalyze() {
+  if (!confirm('Clear all AI analysis and re-run? Takes about a minute.')) return;
+  document.getElementById('reanalyzeBtn').textContent = 'Working...';
+  await fetch('/api/reanalyze', {method:'POST'});
+  setTimeout(() => { location.reload(); }, 60000);
+}
+</script>
+
+{% if collision_alerts %}
+  {% for col in collision_alerts %}
+  <div class="alert alert-danger">
+    <strong>Deadline collision — {{ col.window }}:</strong> {{ col.advice }}
+  </div>
+  {% endfor %}
+{% endif %}
+
+{% if due_today %}
+<div class="section">
+  <h2>Due Today</h2>
+  {% for a in due_today %}
+  <div class="card" id="card-{{ a.id }}" style="border-left: 3px solid var(--red);">
+    <div class="card-header">
+      <div>
+        <div class="card-title">{{ a.title }}</div>
+        <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}</div>
+      </div>
+      <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      {% if a.estimated_hours %}<span class="tag">~{{ a.estimated_hours }}h</span>{% endif %}
+      {% if a.has_early_bonus %}<span class="tag tag-bonus">early bonus</span>{% endif %}
+      {% if a.can_resubmit %}<span class="tag tag-bonus">resubmittable</span>{% endif %}
+      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;">Open</a>{% endif %}
+      <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;color:var(--green);border-color:var(--green);" onclick="markDone('{{ a.id }}', this)">Mark Done</button>
+      <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;" onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
+    </div>
+    {% if a.difficulty %}
+    <div style="margin-top:10px;">
+      <span style="color:var(--muted);font-size:11px;">Difficulty</span>
+      <div class="diff-dots" style="margin-left:8px;vertical-align:middle;">
+        {% for i in range(1, 11) %}
+        <div class="diff-dot {% if i <= a.difficulty %}{% if a.difficulty >= 8 %}critical{% elif a.difficulty >= 6 %}high{% else %}filled{% endif %}{% endif %}"></div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+
+{% if this_week %}
+<div class="section">
+  <h2>This Week — Details</h2>
+  {% for a in this_week %}
+  <div class="card" id="card-{{ a.id }}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">{{ a.title }}</div>
+        <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}{% if a.start_by_fmt %} &nbsp;·&nbsp; <span style="color:var(--accent)">Start {{ a.start_by_fmt }}</span>{% endif %}</div>
+      </div>
+      <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      {% if a.estimated_hours %}<span class="tag">~{{ a.estimated_hours }}h</span>{% endif %}
+      {% if a.assignment_type %}<span class="tag">{{ a.assignment_type }}</span>{% endif %}
+      {% if a.has_early_bonus %}<span class="tag tag-bonus">early bonus</span>{% endif %}
+      {% if a.can_resubmit %}<span class="tag tag-bonus">resubmittable</span>{% endif %}
+      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;">Open</a>{% endif %}
+      <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;color:var(--green);border-color:var(--green);" onclick="markDone('{{ a.id }}', this)">Mark Done</button>
+      <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;" onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
+      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;margin-left:auto;">Open</a>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if upcoming_exams %}
+<div class="section">
+  <h2>Upcoming Exams</h2>
+  {% for e in upcoming_exams %}
+  <div class="card" style="border-left: 3px solid var(--yellow);">
+    <div class="card-header">
+      <div>
+        <div class="card-title">{{ e.title }}</div>
+        <div class="card-sub">{{ e.course_name }} &nbsp;·&nbsp; {{ e.date_fmt }}</div>
+      </div>
+      <span class="badge badge-{{ e.priority or 'high' }}">{{ e.priority or 'high' }}</span>
+    </div>
+    {% if e.study_hours_estimated or e.start_study_by %}
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      {% if e.study_hours_estimated %}<span class="tag">~{{ e.study_hours_estimated }}h studying</span>{% endif %}
+      {% if e.start_study_by %}<span class="tag tag-bonus">Start studying {{ e.start_study_fmt }}</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if not due_today and not this_week and not upcoming_exams %}
+<div class="card" style="text-align:center; padding:48px; color:var(--muted);">
+  <div style="font-size:24px; margin-bottom:8px;">Nothing pressing right now.</div>
+  <div style="font-size:13px;">Good time to get ahead. Check the Assignments page for everything coming up.</div>
+</div>
+{% endif %}
+
+{% if coming_up %}
+<div class="section">
+  <h2>Coming Up (2+ weeks)</h2>
+  <div class="card" style="padding:12px 20px;">
+    {% for a in coming_up %}
+    <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+      <div>
+        <span style="font-weight:500;">{{ a.title }}</span>
+        <span style="color:var(--muted); margin-left:8px; font-size:12px;">{{ a.course_name }}</span>
+      </div>
+      <span style="color:var(--muted); font-size:12px;">{{ a.due_fmt }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<script>
+async function markDone(id, btn) {
+  await fetch(`/api/assignment/${id}/done`, {method:'POST'});
+  const card = document.getElementById('card-' + id) || btn.closest('.card');
+  if (card) { card.style.opacity = '0.4'; card.style.pointerEvents = 'none'; }
+  btn.textContent = 'Done!';
+}
+
+function showDiffEdit(id, currentDiff, currentHours) {
+  const d = prompt(`Difficulty (1-10), currently ${currentDiff}:`);
+  if (d === null) return;
+  const h = prompt(`Estimated hours, currently ${currentHours}h:`);
+  fetch(`/api/assignment/${id}/difficulty`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({difficulty: parseInt(d), hours: h ? parseFloat(h) : null})
+  }).then(() => location.reload());
+}
+</script>
+{% endblock %}

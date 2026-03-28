@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %} — {{ a.title }}{% endblock %}
+
+{% block head %}
+<style>
+  .detail-header {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px 28px 20px;
+    margin-bottom: 20px;
+  }
+  .detail-title {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 6px;
+  }
+  .detail-meta {
+    color: var(--muted);
+    font-size: 13px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+    align-items: center;
+  }
+  .detail-meta .sep { color: var(--border); }
+  .detail-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
+    align-items: center;
+  }
+  .info-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .info-block h3 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .description-content {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text);
+  }
+  .description-content a { color: var(--accent); }
+  .suggestion-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .suggestion-list li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    display: flex;
+    gap: 8px;
+  }
+  .suggestion-list li:last-child { border-bottom: none; }
+  .suggestion-list li::before {
+    content: "→";
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .watchout-list li::before {
+    content: "⚠";
+    color: var(--yellow);
+  }
+  .action-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+  .reasoning-text {
+    font-size: 13px;
+    color: var(--muted);
+    font-style: italic;
+    line-height: 1.6;
+  }
+  .bonus-block {
+    background: rgba(124,108,255,0.08);
+    border: 1px solid var(--accent-dim);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    font-size: 13px;
+  }
+  .bonus-block strong { color: var(--accent); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 16px;">
+  <a href="/assignments" class="btn btn-ghost" style="font-size:12px; padding:6px 12px;">← Back to Assignments</a>
+</div>
+
+<!-- Header card -->
+<div class="detail-header">
+  <div class="detail-title">{{ a.title }}</div>
+  <div class="detail-meta">
+    <span>{{ a.course_name }}</span>
+    {% if a.due_fmt %}
+    <span class="sep">·</span>
+    <span class="{{ a.due_class }}">Due {{ a.due_fmt }}</span>
+    {% endif %}
+    {% if a.points_possible %}
+    <span class="sep">·</span>
+    <span>{{ a.points_possible }} pts</span>
+    {% endif %}
+  </div>
+
+  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+    <span class="badge badge-{{ a.priority or 'medium' }}">{{ a.priority or 'medium' }}</span>
+
+    {% if a.difficulty %}
+    <div class="diff-dots" title="Difficulty {{ a.difficulty }}/10">
+      {% for i in range(1, 11) %}
+      <div class="diff-dot {% if i <= a.difficulty %}{% if a.difficulty >= 8 %}critical{% elif a.difficulty >= 6 %}high{% else %}filled{% endif %}{% endif %}"></div>
+      {% endfor %}
+    </div>
+    <span style="color:var(--muted); font-size:12px;">{{ a.difficulty }}/10</span>
+    {% endif %}
+
+    {% if a.estimated_hours %}
+    <span class="tag">~{{ a.estimated_hours }}h estimated</span>
+    {% endif %}
+
+    {% if a.start_by_fmt %}
+    <span class="tag tag-bonus">Start by {{ a.start_by_fmt }}</span>
+    {% endif %}
+
+    {% if a.assignment_type %}
+    <span class="tag">{{ a.assignment_type }}</span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Action row -->
+<div class="action-row">
+  <button class="btn btn-ghost" style="color:var(--green); border-color:var(--green);"
+          onclick="markDone('{{ a.id }}', this)">Mark Done</button>
+  <button class="btn btn-ghost"
+          onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
+  {% if a.html_url %}
+  <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost">Open in Canvas ↗</a>
+  {% endif %}
+  <a href="/chat" class="btn btn-ghost" style="margin-left:auto;">Chat about this →</a>
+</div>
+
+<!-- Early bonus / resubmit -->
+{% if a.has_early_bonus %}
+<div class="bonus-block">
+  <strong>Early Submission Bonus</strong>
+  {% if a.early_bonus_details %} — {{ a.early_bonus_details }}{% endif %}
+</div>
+{% endif %}
+
+{% if a.can_resubmit %}
+<div class="bonus-block" style="background:rgba(74,222,128,0.07); border-color:rgba(74,222,128,0.25);">
+  <strong style="color:var(--green);">Resubmission Allowed</strong>
+  {% if a.resubmit_details %} — {{ a.resubmit_details }}{% endif %}
+</div>
+{% endif %}
+
+<!-- Description -->
+{% if a.description %}
+<div class="info-block">
+  <h3>Description</h3>
+  <div class="description-content">
+    {% if '<' in a.description and '>' in a.description %}
+      {{ a.description | safe }}
+    {% else %}
+      <p>{{ a.description }}</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Study suggestions -->
+{% if study_suggestions %}
+<div class="info-block">
+  <h3>Study Suggestions</h3>
+  <ul class="suggestion-list">
+    {% for tip in study_suggestions %}
+    <li>{{ tip }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<!-- Watch-outs -->
+{% if watch_outs %}
+<div class="info-block">
+  <h3>Watch Out For</h3>
+  <ul class="suggestion-list watchout-list">
+    {% for w in watch_outs %}
+    <li>{{ w }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<!-- AI Reasoning -->
+{% if reasoning %}
+<div class="info-block">
+  <h3>Hermes Reasoning</h3>
+  <p class="reasoning-text">{{ reasoning }}</p>
+</div>
+{% endif %}
+
+<script>
+async function markDone(id, btn) {
+  await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
+  btn.textContent = 'Done!';
+  btn.style.opacity = '0.5';
+  btn.disabled = true;
+}
+
+function showDiffEdit(id, currentDiff, currentHours) {
+  const d = prompt(`Difficulty (1-10), currently ${currentDiff}:`);
+  if (d === null) return;
+  const h = prompt(`Estimated hours, currently ${currentHours}h:`);
+  fetch(`/api/assignment/${id}/difficulty`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({difficulty: parseInt(d), hours: h ? parseFloat(h) : null})
+  }).then(() => location.reload());
+}
+</script>
+{% endblock %}

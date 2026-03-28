@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Database
+hermes.db
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Logs
+logs/*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
