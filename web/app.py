@@ -778,11 +778,38 @@ def generate_study_plan():
 @app.route("/alerts")
 def alerts_page():
     """Hermes-generated intelligence: proactive warnings, urgent items, what Hermes would text."""
+    from config import Config as _Cfg
     now = datetime.now()
     assignments_raw = db.get_upcoming_assignments(days_ahead=21)
     assignments = [_enrich_assignment(a) for a in assignments_raw]
     exams_raw = db.get_upcoming_exams(days_ahead=21)
     exams = [_enrich_exam(e) for e in exams_raw]
+
+    # --- API quota status ---
+    usage = db.get_api_usage_summary()
+    gemini_calls = usage.get("gemini", 0)
+    groq_calls = usage.get("groq", 0)
+    gemini_limit = _Cfg.GEMINI_DAILY_LIMIT
+    groq_limit = _Cfg.GROQ_DAILY_LIMIT
+
+    quota_status = [
+        {
+            "provider": "Gemini",
+            "calls": gemini_calls,
+            "limit": gemini_limit,
+            "pct": round(gemini_calls / gemini_limit * 100) if gemini_limit else 0,
+            "exhausted": gemini_calls >= gemini_limit,
+            "warning": gemini_calls >= gemini_limit * 0.8,
+        },
+        {
+            "provider": "Groq",
+            "calls": groq_calls,
+            "limit": groq_limit,
+            "pct": round(groq_calls / groq_limit * 100) if groq_limit else 0,
+            "exhausted": groq_calls >= groq_limit,
+            "warning": groq_calls >= groq_limit * 0.8,
+        },
+    ]
 
     alerts = []
 
@@ -868,7 +895,7 @@ def alerts_page():
     if not alerts:
         alerts = []  # empty state handled in template
 
-    return render_template("alerts.html", alerts=alerts)
+    return render_template("alerts.html", alerts=alerts, quota_status=quota_status)
 
 
 # ─── Announcements (Canvas professor posts — lives in Courses tab) ─────────────

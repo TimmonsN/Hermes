@@ -8,9 +8,15 @@ class Config:
     CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://osu.instructure.com")
     CANVAS_TOKEN = os.getenv("CANVAS_TOKEN", "")
 
-    # AI — uses Google Gemini (free tier) by default
+    # AI — Gemini primary (structured analysis), Groq fallback + chat
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    GEMINI_DAILY_LIMIT = int(os.getenv("GEMINI_DAILY_LIMIT", "250"))
+
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL_ANALYSIS = os.getenv("GROQ_MODEL_ANALYSIS", "llama-3.3-70b-versatile")
+    GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "llama-3.1-8b-instant")
+    GROQ_DAILY_LIMIT = int(os.getenv("GROQ_DAILY_LIMIT", "14400"))
 
     # Twilio (for outbound alerts/notifications only)
     TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")

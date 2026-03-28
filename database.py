@@ -166,6 +166,14 @@ def init_db():
             minutes INTEGER,
             logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT,
+            date TEXT,
+            calls INTEGER DEFAULT 0,
+            UNIQUE(provider, date)
+        );
     """)
 
     conn.commit()
@@ -741,6 +749,39 @@ def get_completed_days_streak():
         else:
             break
     return streak
+
+# --- API Usage Tracking ---
+
+def track_api_call(provider: str):
+    """Increment today's call count for a given provider ('gemini' or 'groq')."""
+    conn = get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn.execute("""
+        INSERT INTO api_usage (provider, date, calls) VALUES (?, ?, 1)
+        ON CONFLICT(provider, date) DO UPDATE SET calls = calls + 1
+    """, (provider, today))
+    conn.commit()
+    conn.close()
+
+def get_api_usage_today(provider: str) -> int:
+    conn = get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    row = conn.execute(
+        "SELECT calls FROM api_usage WHERE provider=? AND date=?", (provider, today)
+    ).fetchone()
+    conn.close()
+    return row["calls"] if row else 0
+
+def get_api_usage_summary() -> dict:
+    """Returns {provider: calls_today} for all tracked providers."""
+    conn = get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT provider, calls FROM api_usage WHERE date=?", (today,)
+    ).fetchall()
+    conn.close()
+    return {r["provider"]: r["calls"] for r in rows}
+
 
 def get_semester_completed_count():
     conn = get_conn()

@@ -5,20 +5,31 @@ from datetime import datetime, timedelta
 from google import genai
 from google.genai.errors import ClientError
 from config import Config
+import database as db
 
 logger = logging.getLogger("hermes.analyzer")
 
-_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+_gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+_groq_client = None
+
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None and Config.GROQ_API_KEY:
+        from groq import Groq
+        _groq_client = Groq(api_key=Config.GROQ_API_KEY)
+    return _groq_client
+
 
 def _default_analysis():
-    """Placeholder returned when API is unavailable. NOT stored to DB — triggers retry next sync."""
+    """Placeholder returned when all AI is unavailable. NOT stored to DB — triggers retry next sync."""
     return {
         "difficulty": None, "estimated_hours": None, "priority": "medium",
         "has_early_bonus": False, "early_bonus_details": "",
         "can_resubmit": False, "resubmit_details": "",
         "recommended_days_before_due": Config.BUFFER_DAYS,
         "start_by": None, "reasoning": None,
-        "_rate_limited": True,  # flag so hermes.py skips storing this
+        "_rate_limited": True,
     }
 
 
@@ -28,25 +39,57 @@ Be direct, practical, and fight for the student's success. The student tends to 
 Always respond with valid JSON when asked for structured analysis."""
 
 
+HERMES_CHAT_PERSONA = """You are Hermes, an AI school buddy for a college student at Ohio State University named Niko.
+You know everything about his upcoming assignments and exams. Be supportive, direct, and fight for his success.
+Be warm but no-nonsense. Give plain text responses — no JSON, no bullet formatting unless it really helps."""
+
+def _ask_groq(prompt: str, model: str = None, system_prompt: str = None) -> str:
+    """Send a prompt to Groq and return the text response."""
+    client = _get_groq_client()
+    if not client:
+        raise RuntimeError("Groq not configured — set GROQ_API_KEY")
+    use_model = model or Config.GROQ_MODEL_ANALYSIS
+    sys_msg = system_prompt or HERMES_PERSONA
+    response = client.chat.completions.create(
+        model=use_model,
+        messages=[
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+    )
+    db.track_api_call("groq")
+    return response.choices[0].message.content
+
+
 def _ask(prompt: str, retries: int = 3) -> str:
-    """Send a prompt to Gemini and return the text response.
-    Retries up to `retries` times on 429 rate-limit errors with exponential backoff.
-    """
+    """Send a prompt to Gemini. Falls back to Groq if Gemini is rate-limited after all retries."""
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
+    last_exc = None
     for attempt in range(retries + 1):
         try:
-            response = _client.models.generate_content(
+            response = _gemini_client.models.generate_content(
                 model=Config.GEMINI_MODEL,
-                contents=full_prompt
+                contents=full_prompt,
             )
+            db.track_api_call("gemini")
             return response.text
         except ClientError as e:
-            if e.code == 429 and attempt < retries:
-                wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
-                logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
-                time.sleep(wait)
+            if e.code == 429:
+                last_exc = e
+                if attempt < retries:
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                    logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
+                    time.sleep(wait)
+                # else: fall through to Groq fallback below
             else:
-                raise
+                raise  # non-429 Gemini error
+
+    # Gemini exhausted — fall back to Groq
+    if Config.GROQ_API_KEY:
+        logger.warning("Gemini retries exhausted (429) — falling back to Groq")
+        return _ask_groq(prompt)
+    raise last_exc  # no Groq, re-raise
 
 
 def _parse_json(text: str) -> dict:
@@ -176,22 +219,15 @@ Return ONLY valid JSON, no markdown."""
 
 
 def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> list:
-    """Analyze up to 15 assignments in a single Gemini API call.
+    """Analyze up to 15 assignments in a single API call (Gemini primary, Groq fallback).
 
-    Args:
-        assignments: list of assignment dicts (same shape as used by analyze_assignment)
-        syllabus_rules_map: dict mapping course_id -> syllabus rules dict
-
-    Returns:
-        list of analysis dicts in the same order as the input assignments.
-        Falls back to individual analysis per assignment if batch parsing fails.
+    Returns list of analysis dicts in the same order as the input assignments.
     """
     if not assignments:
         return []
 
     now = datetime.now()
 
-    # Build the batch prompt
     lines = []
     for idx, a in enumerate(assignments):
         due_at = a.get("due_at", "")
@@ -255,10 +291,7 @@ Critical rules:
 
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
-    try:
-        raw = _ask(prompt)
-
-        # _parse_json handles a single object; for an array we do it manually
+    def _parse_batch_result(raw, count):
         text = raw.strip()
         if text.startswith("```"):
             parts = text.split("```")
@@ -266,14 +299,14 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
             if text.startswith("json"):
                 text = text[4:]
         text = text.strip()
-
         results = json.loads(text)
         if not isinstance(results, list):
             raise ValueError("Response was not a JSON array")
-        if len(results) != len(assignments):
-            raise ValueError(f"Expected {len(assignments)} results, got {len(results)}")
+        if len(results) != count:
+            raise ValueError(f"Expected {count} results, got {len(results)}")
+        return results
 
-        # Calculate start_by for each result
+    def _apply_start_by(results):
         for i, analysis in enumerate(results):
             due_at = assignments[i].get("due_at", "")
             if due_at and analysis.get("recommended_days_before_due") is not None:
@@ -284,36 +317,36 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
                     if start_dt.hour < Config.WAKE_HOUR:
                         start_dt = start_dt.replace(hour=Config.WAKE_HOUR, minute=0)
                     analysis["start_by"] = start_dt.isoformat()
-                except Exception as e:
-                    logger.warning(f"Could not calculate start_by for batch item {i}: {e}")
+                except Exception:
                     analysis["start_by"] = None
             else:
                 analysis["start_by"] = None
-
         return results
+
+    # Try Gemini first, then Groq on 429
+    try:
+        raw = _ask(prompt)  # _ask already handles Gemini→Groq fallback internally
+        results = _parse_batch_result(raw, len(assignments))
+        return _apply_start_by(results)
 
     except ClientError as e:
         if e.code == 429:
-            # Rate-limited — return defaults, do NOT fire individual calls (would just 429 again)
-            logger.warning(f"Batch rate-limited (429) — returning defaults for {len(assignments)} assignments. Will retry on next sync.")
+            # Both Gemini and Groq rate-limited (or Groq not configured)
+            logger.warning(f"Batch fully rate-limited — returning defaults for {len(assignments)} assignments.")
             return [_default_analysis() for _ in assignments]
         logger.error(f"Batch API error ({e}), falling back to individual analysis")
-        fallback = []
-        for a in assignments:
-            rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-            fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
-        return fallback
     except Exception as e:
         logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
-        fallback = []
-        for a in assignments:
-            rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-            fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
-        return fallback
+
+    # Parse/logic failure — try individual analysis
+    fallback = []
+    for a in assignments:
+        rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
+        fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
+    return fallback
 
 
 def analyze_course_strategy(course_name: str, syllabus_text: str, current_grade: float = None) -> dict:
-    """Return an overall course strategy based on syllabus and current grade."""
     grade_note = f"Current grade: {current_grade:.1f}%" if current_grade is not None else "No grades entered yet."
 
     prompt = f"""Analyze this course and give a strategic plan to maximize the student's grade.
@@ -345,19 +378,15 @@ Return ONLY valid JSON, no markdown."""
 
 
 def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, stop_hour: int = 22, days: int = 14) -> list:
-    """Generate a day-by-day study schedule for the next N days.
-
-    Returns list of dicts: {date: str, assignment_id: str, hours_planned: float, note: str}
-    """
+    """Generate a day-by-day study schedule for the next N days."""
     from datetime import date, timedelta
 
     if not assignments and not exams:
         return []
 
     now = datetime.now()
-    available_hours_per_day = stop_hour - wake_hour  # hours available daily
+    available_hours_per_day = stop_hour - wake_hour
 
-    # Build work items with urgency scores
     work_items = []
     for a in assignments:
         if not a.get("due_at"):
@@ -387,7 +416,7 @@ def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, sto
             due_dt = datetime.fromisoformat(e["start_at"].replace("Z", "+00:00")).replace(tzinfo=None)
             days_left = max((due_dt - now).days, 0.5)
             hours_needed = float(e.get("study_hours_estimated") or 6.0)
-            urgency = hours_needed / days_left * 2.0  # exams are higher urgency
+            urgency = hours_needed / days_left * 2.0
             work_items.append({
                 "assignment_id": e["id"],
                 "title": f"STUDY: {e.get('title', 'Exam')}",
@@ -403,18 +432,15 @@ def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, sto
     if not work_items:
         return []
 
-    # Sort by urgency descending
     work_items.sort(key=lambda x: -x["urgency"])
 
-    # Build daily schedule
     plan_entries = []
-    daily_budget = {}  # date_str -> hours_scheduled
+    daily_budget = {}
 
     for item in work_items:
         hours_left = item["hours_needed"]
         due_date = item["due_dt"].date()
 
-        # Spread work across days before due date
         for day_offset in range(days):
             plan_date = (now + timedelta(days=day_offset)).date()
             if plan_date >= due_date:
@@ -424,8 +450,8 @@ def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, sto
 
             date_str = plan_date.isoformat()
             used = daily_budget.get(date_str, 0)
-            max_hours = min(available_hours_per_day * 0.6, 6.0)  # cap at 6h/day per item
-            slot = min(hours_left, max_hours - used, 3.0)  # max 3h per item per day
+            max_hours = min(available_hours_per_day * 0.6, 6.0)
+            slot = min(hours_left, max_hours - used, 3.0)
 
             if slot > 0.25:
                 plan_entries.append({
@@ -541,7 +567,10 @@ Return ONLY valid JSON, no markdown."""
 
 
 def generate_chat_response(user_message: str, context: dict) -> str:
-    """Respond conversationally to the student via the web dashboard."""
+    """Respond conversationally to the student via the web dashboard.
+    Uses Groq directly for faster, more natural chat responses.
+    Falls back to Gemini if Groq is unavailable.
+    """
     assignments_summary = []
     for a in context.get("assignments", [])[:10]:
         due = a.get("due_at", "")[:10] if a.get("due_at") else "no due date"
@@ -575,6 +604,10 @@ If he's asking about an assignment, give genuinely useful academic guidance.
 If he seems stressed, be encouraging. If he's too relaxed about something urgent, be honest."""
 
     try:
+        # Groq is primary for chat — faster, more conversational
+        if Config.GROQ_API_KEY:
+            return _ask_groq(prompt, model=Config.GROQ_MODEL_CHAT,
+                             system_prompt=HERMES_CHAT_PERSONA)
         return _ask(prompt)
     except Exception as e:
         logger.error(f"Chat response failed: {e}")
