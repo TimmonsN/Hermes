@@ -622,6 +622,7 @@ def grades_page():
                 "graded_count": 0, "current_avg": None, "letter": "?",
                 "color": "muted", "target": db.get_grade_goal(cid),
                 "grades": [], "on_track": None,
+                "needed_on_final": None, "final_weight_pct": 30,
             })
             continue
 
