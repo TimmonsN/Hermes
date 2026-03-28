@@ -177,6 +177,18 @@ def init_db():
     """)
 
     conn.commit()
+
+    # Add columns that may not exist in older DBs
+    for migration in [
+        "ALTER TABLE courses ADD COLUMN is_ignored INTEGER DEFAULT 0",
+        "ALTER TABLE courses ADD COLUMN canvas_grade_pct REAL",
+    ]:
+        try:
+            conn.execute(migration)
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
     conn.close()
 
 # --- Courses ---
@@ -194,11 +206,26 @@ def upsert_course(canvas_id, name, code):
     conn.close()
     return course_id
 
-def get_courses():
+def get_courses(include_ignored=False):
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM courses WHERE is_active=1").fetchall()
+    if include_ignored:
+        rows = conn.execute("SELECT * FROM courses WHERE is_active=1").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM courses WHERE is_active=1 AND (is_ignored IS NULL OR is_ignored=0)").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def set_course_ignored(course_id, ignored: bool):
+    conn = get_conn()
+    conn.execute("UPDATE courses SET is_ignored=? WHERE id=?", (1 if ignored else 0, str(course_id)))
+    conn.commit()
+    conn.close()
+
+def set_canvas_course_grade(course_id, grade_pct):
+    conn = get_conn()
+    conn.execute("UPDATE courses SET canvas_grade_pct=? WHERE id=?", (grade_pct, str(course_id)))
+    conn.commit()
+    conn.close()
 
 def set_course_piazza(course_id, nid):
     conn = get_conn()
@@ -290,12 +317,14 @@ def store_analysis(assignment_id, analysis: dict):
 def get_upcoming_assignments(days_ahead=14):
     conn = get_conn()
     rows = conn.execute("""
-        SELECT * FROM assignments
-        WHERE due_at IS NOT NULL
-          AND due_at >= datetime('now')
-          AND due_at <= datetime('now', ? || ' days')
-          AND status NOT IN ('complete', 'submitted')
-        ORDER BY due_at ASC
+        SELECT a.* FROM assignments a
+        LEFT JOIN courses c ON c.id = a.course_id
+        WHERE a.due_at IS NOT NULL
+          AND a.due_at >= datetime('now')
+          AND a.due_at <= datetime('now', ? || ' days')
+          AND a.status NOT IN ('complete', 'submitted')
+          AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+        ORDER BY a.due_at ASC
     """, (str(days_ahead),)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -303,13 +332,21 @@ def get_upcoming_assignments(days_ahead=14):
 def get_all_active_assignments():
     conn = get_conn()
     rows = conn.execute("""
-        SELECT * FROM assignments
-        WHERE due_at IS NOT NULL AND due_at >= datetime('now')
-          AND status NOT IN ('complete', 'submitted')
-        ORDER BY due_at ASC
+        SELECT a.* FROM assignments a
+        LEFT JOIN courses c ON c.id = a.course_id
+        WHERE a.due_at IS NOT NULL AND a.due_at >= datetime('now')
+          AND a.status NOT IN ('complete', 'submitted')
+          AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+        ORDER BY a.due_at ASC
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def get_assignment_id_by_canvas_id(canvas_id):
+    conn = get_conn()
+    row = conn.execute("SELECT id FROM assignments WHERE canvas_id=?", (canvas_id,)).fetchone()
+    conn.close()
+    return row["id"] if row else None
 
 def get_unanalyzed_assignments():
     conn = get_conn()

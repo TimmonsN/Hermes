@@ -17,18 +17,30 @@
   .ann-meta { color: var(--muted); font-size: 11px; }
   .ann-msg { color: var(--muted); margin-top: 3px; font-size: 11px; line-height: 1.4;
              max-height: 40px; overflow: hidden; text-overflow: ellipsis; }
+  .btn-ignore {
+    font-size: 11px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+    transition: all 0.15s;
+  }
+  .btn-ignore:hover { border-color: var(--red); color: var(--red); }
+  .grade-badge {
+    font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+    background: var(--surface-2, rgba(255,255,255,0.06));
+  }
 </style>
 
 {% for c in courses %}
-<div class="card">
+<div class="card" id="course-card-{{ c.id }}">
   <div class="card-header">
     <div>
       <div class="card-title">{{ c.name }}</div>
       <div class="card-sub">{{ c.code }}</div>
     </div>
-    <div style="display:flex; gap:8px; align-items:center;">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      {% if c.canvas_grade_pct is not none %}<span class="grade-badge" style="color:{% if c.canvas_grade_pct >= 90 %}var(--green){% elif c.canvas_grade_pct >= 80 %}var(--accent){% elif c.canvas_grade_pct >= 70 %}var(--yellow){% else %}var(--red){% endif %};">{{ "%.1f"|format(c.canvas_grade_pct) }}%</span>{% endif %}
       {% if c.assignment_count %}<span class="tag">{{ c.assignment_count }} assignments</span>{% endif %}
       {% if c.has_syllabus %}<span class="tag tag-bonus">syllabus ingested</span>{% endif %}
+      <button class="btn-ignore" onclick="toggleIgnore({{ c.id }}, this)" title="Hide this course from Hermes">Hide</button>
     </div>
   </div>
 
@@ -76,4 +88,20 @@
   No courses loaded yet. Hermes will sync from Canvas automatically.
 </div>
 {% endif %}
+
+<script>
+function toggleIgnore(courseId, btn) {
+  fetch(`/api/course/${courseId}/ignore`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ignored) {
+        const card = document.getElementById(`course-card-${courseId}`);
+        card.style.opacity = '0';
+        card.style.transition = 'opacity 0.3s';
+        setTimeout(() => card.remove(), 300);
+      }
+    })
+    .catch(() => alert('Failed to hide course.'));
+}
+</script>
 {% endblock %}

@@ -280,33 +280,79 @@ def calendar_page():
 
     today = now.date()
 
-    # Heatmap: total estimated hours of work due ON this specific day.
-    # Color reflects how loaded that calendar day is, not pressure from future deadlines.
-    def _heatmap_intensity(target_date):
+    def _exam_date(e):
+        try:
+            return _from_canvas_time(e["start_at"]).date() if e.get("start_at") else None
+        except Exception:
+            return None
+
+    def _heatmap_pressure(target_date):
+        """Returns (intensity_score, contributors_list).
+        Score = pressure from upcoming assignments + exams within the next several days.
+        Contributors = items causing pressure that aren't due on target_date itself.
+        """
         score = 0.0
+        contributors = []
+
         for a in assignments:
             if not a.get("due_dt"):
                 continue
-            if a["due_dt"].date() == target_date:
+            due_date = a["due_dt"].date()
+            if due_date < target_date:
+                continue
+            days_until = (due_date - target_date).days
+            if days_until == 0:
+                # Items due today contribute directly (shown as cells)
                 hours = a.get("estimated_hours") or 1.5
-                score += hours
-        return round(score, 2)
+                score += hours * 2.0  # due-today items count double
+                continue
+            if days_until <= 5:
+                hours = a.get("estimated_hours") or 1.5
+                # Weight by both hours and urgency — priority matters
+                priority_mult = 1.5 if a.get("priority") in ("high", "critical") else 1.0
+                score += (hours / days_until) * priority_mult
+                if days_until <= 3:
+                    contributors.append({
+                        "title": a["title"], "days_until": days_until, "type": "assignment"
+                    })
+
+        for e in exams:
+            ed = _exam_date(e)
+            if not ed or ed < target_date:
+                continue
+            days_until = (ed - target_date).days
+            if days_until == 0:
+                score += 4.0
+                continue
+            if days_until <= 7:
+                score += 3.0 / max(days_until, 1)
+                if days_until <= 5:
+                    contributors.append({
+                        "title": e["title"], "days_until": days_until, "type": "exam"
+                    })
+
+        # Deduplicate and cap contributors
+        seen = set()
+        unique = []
+        for c in contributors:
+            if c["title"] not in seen:
+                seen.add(c["title"])
+                unique.append(c)
+
+        return round(score, 2), unique[:3]
 
     def _heatmap_level(intensity):
-        """Returns (css_class, height_px) based on total hours due that day."""
         if intensity <= 0:
             return "heat-none", 4
         elif intensity < 2.0:
             return "heat-light", 6
         elif intensity < 5.0:
             return "heat-moderate", 10
-        elif intensity < 8.0:
+        elif intensity < 9.0:
             return "heat-heavy", 16
         else:
             return "heat-overwhelming", 22
 
-    # Start the calendar on the most recent Sunday (US standard week)
-    # isoweekday(): Mon=1 ... Sun=7 → days since Sunday = isoweekday() % 7
     days_since_sunday = today.isoweekday() % 7
     week_start = today - timedelta(days=days_since_sunday)
 
@@ -314,7 +360,7 @@ def calendar_page():
     for week_num in range(4):
         week = []
         week_total_hours = 0.0
-        for day_offset in range(7):  # Sun=0 … Sat=6
+        for day_offset in range(7):
             day_date = week_start + timedelta(weeks=week_num, days=day_offset)
             is_today = (day_date == today)
             is_past = (day_date < today)
@@ -327,24 +373,18 @@ def calendar_page():
                 day_name = day_date.strftime("%A")
 
             day_assignments = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == day_date]
-            day_exams = []
-            for e in exams:
-                if e.get("start_at"):
-                    try:
-                        if _from_canvas_time(e["start_at"]).date() == day_date:
-                            day_exams.append(e)
-                    except Exception:
-                        pass
+            day_exams = [e for e in exams if _exam_date(e) == day_date]
 
             total_hours = sum(a.get("estimated_hours") or 0 for a in day_assignments)
             week_total_hours += total_hours
-            intensity = _heatmap_intensity(day_date)
+            intensity, contributors = _heatmap_pressure(day_date)
             heat_class, heat_height = _heatmap_level(intensity)
             week.append({
                 "day_name": day_name,
                 "date_str": day_date.strftime("%b %-d"),
                 "assignments": day_assignments,
                 "exams": day_exams,
+                "contributors": contributors,  # upcoming items causing pressure
                 "total_hours": round(total_hours, 1),
                 "is_today": is_today,
                 "is_past": is_past,
@@ -547,11 +587,34 @@ def chat_send():
                 status_note = f"Student indicated '{a['title']}' status changed to {status}"
                 break
 
+    # Build rich context including grades and syllabus notes
+    courses_raw = db.get_courses()
+    course_grades_list = [dict(c) for c in courses_raw if c.get("canvas_grade_pct") is not None]
+
+    syllabus_notes = []
+    for c in courses_raw[:5]:
+        syllabi = db.get_syllabus(c["id"])
+        for s in syllabi[:1]:
+            try:
+                import json as _json
+                rules = _json.loads(s["rules_json"]) if s.get("rules_json") else {}
+                gw = rules.get("grading_weights", {})
+                ep = rules.get("late_policy", "")
+                eb = rules.get("early_submission_bonus", {})
+                if gw or ep or eb.get("exists"):
+                    note = f"{c['name']}: weights={gw}" + (f" late={ep}" if ep else "") + (f" early_bonus={eb.get('description','')}" if eb.get("exists") else "")
+                    syllabus_notes.append(note)
+            except Exception:
+                pass
+
     context = {
         "assignments": assignments,
         "exams": db.get_upcoming_exams(days_ahead=30),
         "current_date": datetime.now().strftime("%Y-%m-%d %A"),
-        "status_update_note": status_note
+        "status_update_note": status_note,
+        "grades": db.get_all_grades()[:10],
+        "course_grades": course_grades_list,
+        "syllabus_notes": " | ".join(syllabus_notes[:3]),
     }
 
     response = generate_chat_response(user_message, context)
@@ -688,17 +751,22 @@ def grades_page():
         else:
             needed_on_final = None
 
+        # Prefer Canvas overall grade if available
+        canvas_grade = c.get("canvas_grade_pct")
+        display_avg = canvas_grade if canvas_grade is not None else current_avg
+
         course_summaries.append({
             "id": cid, "name": c["name"], "code": c.get("code", ""),
             "graded_count": len(course_grades),
-            "current_avg": current_avg,
-            "letter": _letter_grade(current_avg),
-            "color": _grade_color(current_avg),
+            "current_avg": display_avg,
+            "canvas_grade": canvas_grade,
+            "letter": _letter_grade(display_avg),
+            "color": _grade_color(display_avg),
             "target": target,
-            "on_track": on_track,
+            "on_track": (display_avg >= target) if display_avg is not None else None,
             "needed_on_final": round(needed_on_final, 1) if needed_on_final is not None else None,
             "final_weight_pct": round(final_weight * 100),
-            "grades": course_grades[:5],  # last 5
+            "grades": course_grades[:5],
         })
 
     return render_template("grades.html",
@@ -731,6 +799,14 @@ def set_grade_goal(course_id):
     target = float(data.get("target", 90))
     db.set_grade_goal(course_id, target)
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/course/<course_id>/ignore", methods=["POST"])
+def toggle_course_ignore(course_id):
+    data = request.get_json() or {}
+    ignored = bool(data.get("ignored", True))
+    db.set_course_ignored(course_id, ignored)
+    return jsonify({"status": "ok", "ignored": ignored})
 
 
 # ─── Study Plan ───────────────────────────────────────────────────────────────

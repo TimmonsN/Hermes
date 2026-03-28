@@ -147,6 +147,9 @@ def sync_canvas():
     # Announcements
     _sync_announcements(courses)
 
+    # Grades — auto-sync from Canvas submissions
+    _sync_grades(courses)
+
     # Clean up exam entries that slipped through old/looser keyword matching
     _clean_bad_exams()
 
@@ -224,9 +227,23 @@ def _sync_syllabi(courses):
             if not content.strip():
                 continue
 
-            logger.info(f"Ingesting syllabus: {cname} — {fname}")
+            logger.info(f"Ingesting syllabus file: {cname} — {fname}")
             rules = analyzer.extract_syllabus_rules(content, cname)
             db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
+
+        # Also ingest Canvas built-in syllabus page (every course has one)
+        html_body = canvas_client.get_course_syllabus_body(cid)
+        if html_body and html_body.strip():
+            fname = "__canvas_syllabus_page__"
+            new_hash = syllabus.hash_content(html_body.encode("utf-8"))
+            if new_hash != db.get_syllabus_hash(str(cid), fname):
+                import re as _re
+                content = _re.sub(r'<[^>]+>', ' ', html_body)
+                content = syllabus.truncate_for_llm(content)
+                if content.strip():
+                    logger.info(f"Ingesting Canvas syllabus page: {cname}")
+                    rules = analyzer.extract_syllabus_rules(content, cname)
+                    db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
 
 
 def _get_syllabus_rules(course_id):
@@ -239,6 +256,33 @@ def _get_syllabus_rules(course_id):
         except Exception:
             pass
     return rules
+
+
+def _sync_grades(courses):
+    """Auto-sync graded submission scores and overall course grade from Canvas."""
+    total_grades = 0
+    for course in courses:
+        cid = course["id"]
+        try:
+            # Per-assignment grades
+            submissions = canvas_client.get_course_submissions(cid)
+            for sub in submissions:
+                canvas_asgn_id = sub.get("assignment_id")
+                score = sub.get("score")
+                asgn = sub.get("assignment") or {}
+                pts_possible = asgn.get("points_possible")
+                if canvas_asgn_id and score is not None and pts_possible:
+                    local_id = db.get_assignment_id_by_canvas_id(canvas_asgn_id)
+                    if local_id:
+                        db.upsert_grade(local_id, str(cid), score, pts_possible)
+                        total_grades += 1
+            # Overall course grade
+            current_grade = canvas_client.get_course_current_grade(cid)
+            if current_grade is not None:
+                db.set_canvas_course_grade(str(cid), current_grade)
+        except Exception as e:
+            logger.warning(f"Grade sync failed for course {cid}: {e}")
+    logger.info(f"Grade sync complete: {total_grades} assignment grades updated.")
 
 
 def _sync_announcements(courses):

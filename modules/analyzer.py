@@ -65,9 +65,15 @@ Be direct, practical, and fight for the student's success. The student tends to 
 Always respond with valid JSON when asked for structured analysis."""
 
 
-HERMES_CHAT_PERSONA = """You are Hermes, an AI school buddy for a college student at Ohio State University named Niko.
-You know everything about his upcoming assignments and exams. Be supportive, direct, and fight for his success.
-Be warm but no-nonsense. Give plain text responses — no JSON, no bullet formatting unless it really helps."""
+HERMES_CHAT_PERSONA = """You are Hermes, Niko's AI school buddy at Ohio State. You have full context on his assignments, exams, and grades.
+
+Hard rules:
+- Answer the exact question asked. Lead with the answer — no preamble, no greeting.
+- Keep responses to 2-4 sentences unless he explicitly asks for detail.
+- Never repeat what you just said. Never re-summarize his situation back to him.
+- If you don't know something specific (like the exact assignment rubric), say so plainly and tell him where to find it. Don't make things up or pivot to something else.
+- Don't add unsolicited advice after answering — if he wants more, he'll ask.
+- Be warm but not sycophantic. No "Great question!" or "Absolutely!"."""
 
 def _ask_groq(prompt: str, model: str = None, system_prompt: str = None) -> str:
     """Send a prompt to Groq and return the text response."""
@@ -598,17 +604,14 @@ Return ONLY valid JSON, no markdown."""
 
 
 def generate_chat_response(user_message: str, context: dict) -> str:
-    """Respond conversationally to the student via the web dashboard.
-    Uses Groq directly for faster, more natural chat responses.
-    Falls back to Gemini if Groq is unavailable.
-    """
+    """Respond conversationally. Uses Groq (fast) with Gemini fallback."""
     assignments_summary = []
-    for a in context.get("assignments", [])[:10]:
+    for a in context.get("assignments", [])[:12]:
         due = a.get("due_at", "")[:10] if a.get("due_at") else "no due date"
         assignments_summary.append(
-            f"- {a.get('title')} ({a.get('course_name','')}) due {due}, "
-            f"status: {a.get('status','pending')}, priority: {a.get('priority','?')}, "
-            f"difficulty: {a.get('difficulty','?')}/10, ~{a.get('estimated_hours','?')}h"
+            f"- {a.get('title')} ({a.get('course_name','')}) due {due} | "
+            f"status:{a.get('status','pending')} priority:{a.get('priority','?')} "
+            f"diff:{a.get('difficulty','?')}/10 ~{a.get('estimated_hours','?')}h"
         )
 
     exams_summary = []
@@ -616,23 +619,36 @@ def generate_chat_response(user_message: str, context: dict) -> str:
         date = e.get("start_at", "")[:10] if e.get("start_at") else "unknown"
         exams_summary.append(f"- {e.get('title')} ({e.get('course_name','')}) on {date}")
 
-    prompt = f"""You are Hermes, an AI school buddy for a college student at Ohio State University named Niko.
-You know everything about his upcoming assignments and exams. Be supportive, direct, and fight for his success.
-Be warm but no-nonsense. Today is {context.get('current_date', datetime.now().strftime('%Y-%m-%d'))}.
+    grades_summary = []
+    for g in context.get("grades", [])[:8]:
+        if g.get("grade_pct") is not None:
+            grades_summary.append(f"- {g.get('title','?')} ({g.get('course_name','?')}): {g['grade_pct']:.1f}%")
 
-Upcoming assignments:
-{chr(10).join(assignments_summary) if assignments_summary else 'None upcoming.'}
+    course_grades_summary = []
+    for c in context.get("course_grades", []):
+        if c.get("canvas_grade_pct") is not None:
+            course_grades_summary.append(f"- {c['name']}: {c['canvas_grade_pct']:.1f}% overall")
 
-Upcoming exams:
-{chr(10).join(exams_summary) if exams_summary else 'None upcoming.'}
+    syllabus_summary = context.get("syllabus_notes", "")
 
-{('Note: ' + context.get('status_update_note','')) if context.get('status_update_note') else ''}
+    prompt = f"""Today: {context.get('current_date', datetime.now().strftime('%Y-%m-%d %A'))}
 
-Niko says: {user_message}
+Assignments:
+{chr(10).join(assignments_summary) if assignments_summary else 'None.'}
 
-Respond helpfully and directly. If he tells you he finished or started something, acknowledge it positively.
-If he's asking about an assignment, give genuinely useful academic guidance.
-If he seems stressed, be encouraging. If he's too relaxed about something urgent, be honest."""
+Exams:
+{chr(10).join(exams_summary) if exams_summary else 'None.'}
+
+Course grades (from Canvas):
+{chr(10).join(course_grades_summary) if course_grades_summary else 'Not available.'}
+
+Recent graded assignments:
+{chr(10).join(grades_summary) if grades_summary else 'None entered.'}
+
+{('Syllabus notes: ' + syllabus_summary) if syllabus_summary else ''}
+{('Context: ' + context.get('status_update_note','')) if context.get('status_update_note') else ''}
+
+Niko: {user_message}"""
 
     try:
         # Groq is primary for chat — faster, more conversational
