@@ -173,6 +173,31 @@ Return ONLY valid JSON, no markdown."""
         return {}
 
 
+def generate_course_notes(course_name: str, syllabus_content: str, rules: dict, grade_context: str = "") -> str:
+    """Generate strategic course notes that Hermes uses as persistent memory for this course."""
+    rules_summary = json.dumps(rules, indent=2) if rules else "No structured rules extracted."
+    prompt = f"""You are Hermes analyzing a course to build persistent strategic notes.
+
+Course: {course_name}
+{grade_context}
+
+Syllabus/materials content:
+{syllabus_content[:3000]}
+
+Extracted rules:
+{rules_summary[:1000]}
+
+Write 3-5 sentences of dense, strategic notes that will help you give better advice on assignments for this course.
+Focus on: grading weights (what matters most), assignment patterns, late/resubmit policies, any known professor quirks, and what typically causes students to lose points.
+Be specific and factual — these notes are your memory of this course. Write in first person as Hermes.
+Return plain text, no JSON, no headers."""
+    try:
+        return _ask(prompt)
+    except Exception as e:
+        logger.error(f"generate_course_notes failed for {course_name}: {e}")
+        return ""
+
+
 def analyze_assignment(assignment: dict, syllabus_rules: dict, course_name: str) -> dict:
     due_at = assignment.get("due_at", "")
     now = datetime.now()
@@ -250,7 +275,7 @@ Return ONLY valid JSON, no markdown."""
         }
 
 
-def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None) -> list:
+def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None, course_notes_map: dict = None) -> list:
     """Analyze up to 15 assignments in a single API call (Gemini primary, Groq fallback).
 
     Returns list of analysis dicts in the same order as the input assignments.
@@ -276,6 +301,8 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, cours
         rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
         raw_desc = a.get("description") or ""
         materials = (course_materials_map or {}).get(str(a.get("course_id", "")), "")
+        rubric = a.get("rubric_text", "")
+        course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
         if _is_boilerplate_description(raw_desc):
             if materials:
                 desc = f"[No real Canvas description. Course material files found — use these to understand the assignment:]\n{materials[:600]}"
@@ -294,6 +321,8 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, cours
             f"Due: {due_at} ({days_until_due} days from now)\n"
             f"Submission types: {a.get('submission_types', 'unknown')}\n"
             f"Description: {desc}\n"
+            f"Rubric (grading criteria): {rubric if rubric else 'Not available'}\n"
+            f"Course strategy notes: {course_notes[:400] if course_notes else 'None yet'}\n"
             f"Syllabus rules: {rules_summary}"
         )
 
@@ -637,6 +666,13 @@ def generate_chat_response(user_message: str, context: dict) -> str:
 
     syllabus_summary = context.get("syllabus_notes", "")
 
+    course_notes_list = []
+    for c in context.get("course_grades", []):
+        notes = db.get_course_notes(str(c.get("id", c.get("canvas_id", ""))))
+        if notes:
+            course_notes_list.append(f"[{c['name']}] {notes[:300]}")
+    course_notes_block = ("Course strategy notes:\n" + "\n".join(course_notes_list)) if course_notes_list else ""
+
     # Build focused assignment block if this is an assignment-specific chat
     focused_block = ""
     fa = context.get("focused_assignment")
@@ -673,6 +709,7 @@ Recent graded assignments:
 {chr(10).join(grades_summary) if grades_summary else 'None entered.'}
 
 {('Syllabus notes: ' + syllabus_summary) if syllabus_summary else ''}
+{course_notes_block}
 {('Context: ' + context.get('status_update_note','')) if context.get('status_update_note') else ''}
 
 Niko: {user_message}"""

@@ -62,6 +62,22 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # --- Canvas Sync ---
 
+def _extract_rubric(rubric_data: list) -> str:
+    """Convert Canvas rubric criteria list to readable text for AI context."""
+    if not rubric_data:
+        return ""
+    lines = []
+    for criterion in rubric_data:
+        desc = criterion.get("description", "")
+        pts = criterion.get("points", "")
+        long_desc = criterion.get("long_description", "")
+        line = f"- {desc} ({pts} pts)"
+        if long_desc:
+            line += f": {long_desc[:200]}"
+        lines.append(line)
+    return "\n".join(lines)[:1500]
+
+
 def sync_canvas():
     logger.info("Canvas sync starting...")
     courses = canvas_client.get_active_courses()
@@ -99,6 +115,7 @@ def sync_canvas():
                 "points_possible": a.get("points_possible"),
                 "submission_types": ",".join(a.get("submission_types", [])),
                 "html_url": a.get("html_url", ""),
+                "rubric_text": _extract_rubric(a.get("rubric") or []),
             }
             assignment_id = db.upsert_assignment(data)
 
@@ -109,10 +126,12 @@ def sync_canvas():
                 db.update_assignment_status(assignment_id, "submitted")
 
             existing = db.get_assignment_by_id(assignment_id)
-            if existing and existing.get("status") not in ("submitted", "complete"):
+            if existing:
                 if not existing.get("analysis_json"):
+                    # Never analyzed — queue regardless of submission status
                     new_for_analysis.append(existing)
-                elif _is_default_analysis(existing["analysis_json"]):
+                elif existing.get("status") not in ("submitted", "complete") and _is_default_analysis(existing["analysis_json"]):
+                    # Has fallback/default analysis and still pending — re-analyze
                     needs_reanalysis.append(existing)
 
             # Also register exam-like assignments as exam events
@@ -150,6 +169,9 @@ def sync_canvas():
     # Grades — auto-sync from Canvas submissions
     _sync_grades(courses)
 
+    # Generate/refresh strategic course notes
+    _sync_course_notes(courses)
+
     # Clean up exam entries that slipped through old/looser keyword matching
     _clean_bad_exams()
 
@@ -164,14 +186,17 @@ def sync_canvas():
             # Build syllabus_rules_map and course_materials_map for this chunk
             rules_map = {}
             materials_map = {}
+            course_notes_map = {}
             for a in chunk:
                 cid = str(a["course_id"])
                 if cid not in rules_map:
                     rules_map[cid] = _get_syllabus_rules(cid)
                 if cid not in materials_map:
                     materials_map[cid] = _get_course_materials(cid)
+                if cid not in course_notes_map:
+                    course_notes_map[cid] = db.get_course_notes(cid)
             try:
-                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map)
+                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map, course_notes_map)
                 stored = 0
                 for a, analysis in zip(chunk, analyses):
                     if analysis.get("_rate_limited"):
@@ -208,7 +233,9 @@ def _sync_syllabi(courses):
     for course in courses:
         cid = course["id"]
         cname = course.get("name", "")
+        logger.info(f"Checking files for {cname} (course {cid})...")
         files = canvas_client.get_course_files(cid)
+        logger.info(f"  {cname}: found {len(files)} files total")
         ingested_something = False
 
         for f in files:
@@ -287,6 +314,52 @@ def _get_course_materials(course_id, max_chars=1200):
         if content and len(content.strip()) > 100:
             snippets.append(f"[{fname}]\n{content[:500].strip()}")
     return "\n\n".join(snippets)[:max_chars]
+
+
+def _sync_course_notes(courses):
+    """Generate and store strategic course notes for each course using syllabus + grade data."""
+    for course in courses:
+        cid = str(course["id"])
+        cname = course.get("name", "")
+
+        # Skip if notes already exist (regenerate only if we have new data)
+        existing_notes = db.get_course_notes(cid)
+        syllabi = db.get_syllabus(cid)
+        if existing_notes and not syllabi:
+            continue  # No syllabus to learn from, keep existing notes
+
+        # Build context for note generation
+        rules_map = _get_syllabus_rules(cid)
+        materials = _get_course_materials(cid)
+        grades = db.get_grades_for_course(cid)
+        canvas_grade = course.get("canvas_grade_pct")
+
+        syllabus_content = ""
+        for s in syllabi[:2]:
+            if s.get("content"):
+                syllabus_content += s["content"][:800]
+
+        if not syllabus_content and not materials and not grades:
+            continue  # Nothing to generate notes from
+
+        grade_context = ""
+        if canvas_grade is not None:
+            grade_context = f"Current grade: {canvas_grade:.1f}%"
+        elif grades:
+            valid = [g["grade_pct"] for g in grades if g.get("grade_pct") is not None]
+            if valid:
+                avg = sum(valid) / len(valid)
+                grade_context = f"Current avg from {len(valid)} graded assignments: {avg:.1f}%"
+
+        try:
+            notes = analyzer.generate_course_notes(
+                cname, syllabus_content or materials, rules_map, grade_context
+            )
+            if notes:
+                db.set_course_notes(cid, notes)
+                logger.info(f"Course notes generated for {cname}")
+        except Exception as e:
+            logger.warning(f"Course notes generation failed for {cname}: {e}")
 
 
 def _sync_grades(courses):

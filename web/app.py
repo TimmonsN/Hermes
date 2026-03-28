@@ -426,29 +426,8 @@ def assignment_detail(assignment_id):
     checklist_stats = db.get_checklist_stats(assignment_id)
     time_spent = db.get_time_spent(assignment_id)
 
-    # Grade entry
+    # Grade entry (read-only display)
     grade_obj = db.get_grade_for_assignment(assignment_id)
-
-    # Syllabus grading weights for GPA impact calc
-    syllabus_weights = {}
-    if a.get("course_id"):
-        syllabi = db.get_syllabus(a["course_id"])
-        for s in syllabi:
-            try:
-                rules = json.loads(s["rules_json"]) if s.get("rules_json") else {}
-                w = rules.get("grading_weights", {})
-                if w:
-                    syllabus_weights = w
-                    break
-            except Exception:
-                pass
-
-    # Current course grade
-    course_grades = db.get_grades_for_course(a.get("course_id", "")) if a.get("course_id") else []
-    current_avg = None
-    if course_grades:
-        valid = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
-        current_avg = round(sum(valid) / len(valid), 1) if valid else None
 
     # Flag if Canvas gave us a useless description so the UI can show a note
     description_inferred = _is_boilerplate_description(a.get("description", ""))
@@ -466,8 +445,6 @@ def assignment_detail(assignment_id):
         checklist_stats=checklist_stats,
         time_spent=time_spent,
         grade_obj=grade_obj,
-        syllabus_weights=syllabus_weights,
-        current_avg=current_avg,
         description_inferred=description_inferred,
     )
 
@@ -722,7 +699,7 @@ def reanalyze_all():
     """Clear all analysis and re-run. Use when Gemini was misbehaving."""
     import sqlite3
     conn = db.get_conn()
-    conn.execute("UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority='medium'")
+    conn.execute("UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority=NULL")
     conn.execute("UPDATE exam_events SET analysis_json=NULL, study_hours_estimated=NULL, start_study_by=NULL")
     conn.commit()
     conn.close()

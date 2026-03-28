@@ -339,72 +339,13 @@
 </div>
 {% endif %}
 
-<!-- Grade Entry -->
-<div class="info-block">
-  <h3>Grade Received</h3>
-  {% if grade_obj %}
-  <div style="margin-bottom:12px; font-size:14px;">
-    Current grade:
-    <strong style="font-size:18px; color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">
-      {{ grade_obj.points_earned }}/{{ grade_obj.points_possible }} ({{ "%.1f"|format(grade_obj.grade_pct) }}%)
-    </strong>
-    <button onclick="deleteGrade('{{ a.id }}')" class="btn btn-ghost" style="font-size:11px; padding:2px 8px; margin-left:8px; color:var(--muted);">Remove</button>
+{% if grade_obj %}
+<div class="info-block" style="border-color:rgba(74,222,128,0.25);">
+  <h3>Grade</h3>
+  <div style="font-size:22px; font-weight:700; color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">
+    {{ "%.1f"|format(grade_obj.grade_pct) }}%
+    <span style="font-size:14px; color:var(--muted); font-weight:400;">{{ grade_obj.points_earned }}/{{ grade_obj.points_possible }} pts</span>
   </div>
-  {% endif %}
-  <div class="grade-entry-row">
-    <div>
-      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">Points Earned</div>
-      <input class="grade-input" type="number" id="pts-earned" min="0"
-             value="{{ grade_obj.points_earned if grade_obj else '' }}"
-             placeholder="e.g. 87" />
-    </div>
-    <div style="color:var(--muted); margin-top:16px;">/</div>
-    <div>
-      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">Points Possible</div>
-      <input class="grade-input" type="number" id="pts-possible" min="1"
-             value="{{ grade_obj.points_possible if grade_obj else (a.points_possible or '') }}"
-             placeholder="{{ a.points_possible or '100' }}" />
-    </div>
-    <div style="margin-top:16px;">
-      <button class="btn btn-primary" onclick="saveGrade('{{ a.id }}')">Save Grade</button>
-    </div>
-    <div class="grade-result" id="grade-result" style="margin-top:12px;
-      {% if grade_obj %}color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %}{% else %}display:none{% endif %};">
-      {% if grade_obj %}{{ "%.1f"|format(grade_obj.grade_pct) }}%{% endif %}
-    </div>
-  </div>
-</div>
-
-<!-- Grade Targets -->
-{% if a.points_possible %}
-<div class="info-block">
-  <h3>Score Targets</h3>
-  <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
-    {% set pts = a.points_possible %}
-    {% for label, threshold in [('A (90%+)', 0.90), ('B (80%)', 0.80), ('C (70%)', 0.70)] %}
-    <div style="background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 16px; text-align:center; flex:1; min-width:100px;">
-      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">{{ label }}</div>
-      <div style="font-size:18px; font-weight:700; color:{% if loop.index == 1 %}var(--green){% elif loop.index == 2 %}var(--yellow){% else %}var(--orange){% endif %};">
-        {{ (pts * threshold) | round | int }}+ pts
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% if current_avg is not none and syllabus_weights %}
-  <div style="font-size:12px; color:var(--muted);">
-    Current course avg: <strong style="color:var(--text);">{{ current_avg }}%</strong>
-    — keep scoring 90%+ on remaining work to protect that average.
-  </div>
-  {% elif current_avg is not none %}
-  <div style="font-size:12px; color:var(--muted);">
-    Your current course avg is <strong style="color:var(--text);">{{ current_avg }}%</strong>.
-    Score at least <strong style="color:var(--text);">{{ (a.points_possible * 0.90) | round | int }} pts</strong> here to stay on track for an A.
-  </div>
-  {% else %}
-  <div style="font-size:12px; color:var(--muted);">
-    Enter grades on this page to track your course average and stay on target.
-  </div>
-  {% endif %}
 </div>
 {% endif %}
 
@@ -456,7 +397,7 @@
 {% elif not a.analysis_json %}
 <div class="info-block" style="border-color:rgba(124,108,255,0.15);">
   <h3>Hermes Analysis</h3>
-  <p style="font-size:13px; color:var(--muted);">Analysis pending — Hermes will analyze this during the next sync (2pm / 8pm).</p>
+  <p style="font-size:13px; color:var(--muted);">Analysis pending — Hermes will analyze this on the next analysis run. Trigger one from the dashboard if needed.</p>
 </div>
 {% endif %}
 
@@ -535,30 +476,7 @@ function showDiffEdit(id, currentDiff, currentHours) {
   }).then(() => location.reload());
 }
 
-// Grade entry
-async function saveGrade(id) {
-  const earned = parseFloat(document.getElementById('pts-earned').value);
-  const possible = parseFloat(document.getElementById('pts-possible').value);
-  if (isNaN(earned) || isNaN(possible) || possible <= 0) return;
-  const resp = await fetch(`/api/grade/${id}`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({points_earned: earned, points_possible: possible})
-  });
-  const data = await resp.json();
-  const pct = data.grade_pct;
-  const el = document.getElementById('grade-result');
-  el.textContent = pct.toFixed(1) + '%';
-  el.style.display = 'block';
-  el.style.color = pct >= 90 ? 'var(--green)' : pct >= 80 ? 'var(--yellow)' : 'var(--red)';
-}
-
-async function deleteGrade(id) {
-  await fetch(`/api/grade/${id}`, {method: 'DELETE'});
-  location.reload();
-}
-
-// Grade save still needs letter grade for display
+// Letter grade helper
 function letterGrade(pct) {
   if (pct >= 93) return 'A';
   if (pct >= 90) return 'A-';

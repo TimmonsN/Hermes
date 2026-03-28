@@ -64,20 +64,31 @@
 
   {% if c.announcements %}
   <div style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
-    <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">
-      Professor Posts
-    </div>
-    {% for ann in c.announcements %}
-    <div class="ann-item">
-      <div class="ann-title {% if ann.highlighted %}highlighted{% endif %}">
-        {% if ann.highlighted %}⚡ {% endif %}{{ ann.title }}
+    {% set has_crucial = c.announcements | selectattr('highlighted') | list | length > 0 %}
+    <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;"
+         onclick="toggleAnn('ann-{{ c.id }}')" id="ann-hdr-{{ c.id }}">
+      <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px;">
+        Professor Posts
+        {% if has_crucial %}<span style="color:var(--yellow); margin-left:6px;">⚡ urgent</span>{% endif %}
       </div>
-      <div class="ann-meta">{{ ann.posted_fmt }}</div>
-      {% if ann.message %}
-      <div class="ann-msg">{{ ann.message | striptags | truncate(120) }}</div>
-      {% endif %}
+      <div style="font-size:11px; color:var(--muted);" id="ann-toggle-{{ c.id }}">
+        {{ c.announcements|length }} post{{ 's' if c.announcements|length != 1 else '' }}
+        <span id="ann-arrow-{{ c.id }}">{% if has_crucial %}▲{% else %}▼{% endif %}</span>
+      </div>
     </div>
-    {% endfor %}
+    <div id="ann-{{ c.id }}" style="{% if not has_crucial %}display:none;{% endif %}margin-top:8px;">
+      {% for ann in c.announcements %}
+      <div class="ann-item">
+        <div class="ann-title {% if ann.highlighted %}highlighted{% endif %}">
+          {% if ann.highlighted %}⚡ {% endif %}{{ ann.title }}
+        </div>
+        <div class="ann-meta">{{ ann.posted_fmt }}</div>
+        {% if ann.message %}
+        <div class="ann-msg">{{ ann.message | striptags | truncate(120) }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
 </div>
@@ -102,6 +113,19 @@ function toggleIgnore(courseId, btn) {
       }
     })
     .catch(() => alert('Failed to hide course.'));
+}
+
+function toggleAnn(id) {
+  const el = document.getElementById(id);
+  const courseId = id.replace('ann-', '');
+  const arrow = document.getElementById('ann-arrow-' + courseId);
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    arrow.textContent = '▲';
+  } else {
+    el.style.display = 'none';
+    arrow.textContent = '▼';
+  }
 }
 </script>
 {% endblock %}

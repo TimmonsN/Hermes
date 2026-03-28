@@ -50,7 +50,7 @@ def get_assignments(course_id):
     try:
         assignments = _get(f"{BASE}/api/v1/courses/{course_id}/assignments", params={
             "per_page": 50,
-            "include[]": ["submission"],
+            "include[]": ["submission", "rubric"],
             "order_by": "due_at"
         })
         return assignments if isinstance(assignments, list) else []
@@ -63,7 +63,6 @@ def get_course_files(course_id):
     try:
         files = _get(f"{BASE}/api/v1/courses/{course_id}/files", params={
             "per_page": 50,
-            "content_types[]": ["application/pdf", "text/html"]
         })
         return files if isinstance(files, list) else []
     except Exception as e:
