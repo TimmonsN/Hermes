@@ -144,6 +144,9 @@ def sync_canvas():
     # Syllabi
     _sync_syllabi(courses)
 
+    # Announcements
+    _sync_announcements(courses)
+
     # Clean up exam entries that slipped through old/looser keyword matching
     _clean_bad_exams()
 
@@ -229,6 +232,27 @@ def _get_syllabus_rules(course_id):
         except Exception:
             pass
     return rules
+
+
+def _sync_announcements(courses):
+    """Sync recent announcements from Canvas for all active courses."""
+    total = 0
+    for course in courses:
+        cid = course["id"]
+        cname = course.get("name", "")
+        try:
+            items = canvas_client.get_announcements(cid)
+            for item in items:
+                canvas_id = str(item.get("id", ""))
+                title = item.get("title", "")
+                message = item.get("message", "") or ""
+                posted_at = item.get("posted_at") or item.get("created_at", "")
+                if canvas_id and title:
+                    db.upsert_announcement(canvas_id, str(cid), cname, title, message, posted_at)
+                    total += 1
+        except Exception as e:
+            logger.warning(f"Announcement sync failed for {cname}: {e}")
+    logger.info(f"Announcements synced: {total} items across {len(courses)} courses.")
 
 
 def _clean_bad_exams():

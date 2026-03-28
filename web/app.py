@@ -2,9 +2,9 @@ import sys
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -17,6 +17,13 @@ from modules.scheduler_engine import should_send_start_reminder
 
 app = Flask(__name__)
 logger = logging.getLogger("hermes.web")
+
+
+@app.context_processor
+def inject_globals():
+    unread = db.get_unread_announcement_count()
+    streak = db.get_completed_days_streak()
+    return dict(unread_announcements=unread, streak=streak)
 
 
 def _from_canvas_time(ts: str) -> datetime:
@@ -57,7 +64,7 @@ def _fmt_start_by(start_by_str):
         now = datetime.now()
         if dt.date() == now.date():
             return "today"
-        elif dt.date() == (now + __import__('datetime').timedelta(days=1)).date():
+        elif dt.date() == (now + timedelta(days=1)).date():
             return "tomorrow"
         return dt.strftime("%a %b %d")
     except Exception:
@@ -157,6 +164,86 @@ def dashboard():
     today_hours = sum(a.get("estimated_hours") or 0 for a in due_today)
     week_hours = sum(a.get("estimated_hours") or 0 for a in this_week)
 
+    # --- Proactive Intelligence Warnings ---
+    proactive_warnings = []
+
+    # Warning: heavy workload in next 48h
+    next_48h = [a for a in assignments if a.get("due_dt") and
+                0 <= (a["due_dt"] - now).total_seconds() / 3600 <= 48]
+    total_48h_hours = sum(a.get("estimated_hours") or 0 for a in next_48h)
+    if total_48h_hours >= 4:
+        hardest = max(next_48h, key=lambda x: x.get("difficulty") or 0, default=None)
+        hardest_name = hardest["title"] if hardest else "your hardest assignment"
+        proactive_warnings.append({
+            "level": "danger",
+            "icon": "fire",
+            "message": f"You have ~{round(total_48h_hours, 1)}h of work due in the next 48h — start {hardest_name} NOW."
+        })
+
+    # Warning: exams in less than 5 days
+    soon_exams = [e for e in exams if e.get("start_at")]
+    for e in soon_exams:
+        try:
+            exam_dt = _from_canvas_time(e["start_at"])
+            days_away = (exam_dt - now).days
+            if 0 < days_away <= 5:
+                proactive_warnings.append({
+                    "level": "warning",
+                    "icon": "exam",
+                    "message": f"Exam in {days_away} day{'s' if days_away != 1 else ''}: {e['title']} ({e.get('course_name','')}) — you should already be studying."
+                })
+        except Exception:
+            pass
+
+    # Warning: 3+ assignments due same day
+    from collections import defaultdict
+    day_counts = defaultdict(list)
+    for a in assignments:
+        if a.get("due_dt"):
+            day_counts[a["due_dt"].date()].append(a)
+    for day_date, day_items in day_counts.items():
+        if len(day_items) >= 3:
+            days_away = (datetime(day_date.year, day_date.month, day_date.day) - now).days
+            if 1 <= days_away <= 7:
+                proactive_warnings.append({
+                    "level": "warning",
+                    "icon": "stack",
+                    "message": f"{len(day_items)} assignments due on {day_date.strftime('%A %b %-d')} — plan your weekend around this."
+                })
+
+    # Warning: unstarted assignment due tomorrow
+    for a in assignments:
+        if a.get("due_dt") and a.get("status", "pending") == "pending":
+            hours_away = (a["due_dt"] - now).total_seconds() / 3600
+            if 0 < hours_away <= 30:
+                proactive_warnings.append({
+                    "level": "danger",
+                    "icon": "clock",
+                    "message": f"You haven't started '{a['title']}' and it's due in ~{int(hours_away)}h."
+                })
+
+    # Warning: early submission bonus expiring
+    for a in assignments:
+        if a.get("has_early_bonus") and a.get("due_dt"):
+            hours_away = (a["due_dt"] - now).total_seconds() / 3600
+            if 24 <= hours_away <= 36:
+                proactive_warnings.append({
+                    "level": "info",
+                    "icon": "bonus",
+                    "message": f"Early submission bonus window closing soon for '{a['title']}' — submit in the next ~{int(hours_away - 24)}h for bonus points."
+                })
+
+    # --- Quick Stats ---
+    all_grades = db.get_all_grades()
+    avg_grade = None
+    if all_grades:
+        valid = [g["grade_pct"] for g in all_grades if g.get("grade_pct") is not None]
+        avg_grade = round(sum(valid) / len(valid), 1) if valid else None
+
+    week_minutes = db.get_total_time_this_week()
+    week_hours_logged = round(week_minutes / 60, 1) if week_minutes else 0
+    completed_count = db.get_semester_completed_count()
+
     return render_template("dashboard.html",
         greeting=greeting,
         today_str=now.strftime("%A, %B %d"),
@@ -169,6 +256,10 @@ def dashboard():
         collision_alerts=collision_alerts,
         today_hours=round(today_hours, 1),
         week_hours=round(week_hours, 1),
+        proactive_warnings=proactive_warnings,
+        avg_grade=avg_grade,
+        week_hours_logged=week_hours_logged,
+        completed_count=completed_count,
     )
 
 
@@ -180,9 +271,33 @@ def calendar_page():
     exams_raw = db.get_upcoming_exams(days_ahead=28)
     exams = [_enrich_exam(e) for e in exams_raw]
 
+    # Build heatmap intensity: sum of (hours * 1/days_until_due) for assignments due within 7 days of that day
+    def _heatmap_intensity(target_date):
+        score = 0.0
+        for a in assignments:
+            if a.get("due_dt") and a.get("estimated_hours"):
+                days_diff = abs((a["due_dt"].date() - target_date).days)
+                if days_diff <= 7:
+                    days_until = max((a["due_dt"].date() - target_date).days, 0.5)
+                    score += (a["estimated_hours"] * (1.0 / days_until))
+        return round(score, 2)
+
+    def _heatmap_class(intensity):
+        if intensity <= 0:
+            return "heat-none"
+        elif intensity < 1.5:
+            return "heat-light"
+        elif intensity < 4.0:
+            return "heat-moderate"
+        elif intensity < 8.0:
+            return "heat-heavy"
+        else:
+            return "heat-overwhelming"
+
     weeks = []
     for week_num in range(4):
         week = []
+        week_total_hours = 0.0
         for day_offset in range(7):
             offset = week_num * 7 + day_offset
             day_date = (now + timedelta(days=offset)).date()
@@ -204,6 +319,8 @@ def calendar_page():
                         pass
 
             total_hours = sum(a.get("estimated_hours") or 0 for a in day_assignments)
+            week_total_hours += total_hours
+            intensity = _heatmap_intensity(day_date)
             week.append({
                 "day_name": day_name,
                 "date_str": day_date.strftime("%b %-d"),
@@ -211,8 +328,10 @@ def calendar_page():
                 "exams": day_exams,
                 "total_hours": round(total_hours, 1),
                 "is_today": offset == 0,
+                "heat_intensity": intensity,
+                "heat_class": _heatmap_class(intensity),
             })
-        weeks.append(week)
+        weeks.append({"days": week, "week_total_hours": round(week_total_hours, 1)})
 
     return render_template("calendar.html", weeks=weeks)
 
@@ -227,14 +346,49 @@ def assignment_detail(assignment_id):
     study_suggestions = []
     watch_outs = []
     reasoning = ""
+    time_breakdown = {}
+    course_strategy_note = ""
     if a.get("analysis_json"):
         try:
             analysis = json.loads(a["analysis_json"])
             study_suggestions = analysis.get("study_suggestions", [])
             watch_outs = analysis.get("watch_outs", [])
             reasoning = analysis.get("reasoning", "")
+            time_breakdown = analysis.get("time_breakdown", {})
+            course_strategy_note = analysis.get("course_strategy_note", "")
         except Exception:
             pass
+
+    # Notes & checklist
+    note_obj = db.get_assignment_note(assignment_id)
+    note_text = note_obj["note"] if note_obj else ""
+    checklist = db.get_checklist(assignment_id)
+    checklist_stats = db.get_checklist_stats(assignment_id)
+    time_spent = db.get_time_spent(assignment_id)
+
+    # Grade entry
+    grade_obj = db.get_grade_for_assignment(assignment_id)
+
+    # Syllabus grading weights for GPA impact calc
+    syllabus_weights = {}
+    if a.get("course_id"):
+        syllabi = db.get_syllabus(a["course_id"])
+        for s in syllabi:
+            try:
+                rules = json.loads(s["rules_json"]) if s.get("rules_json") else {}
+                w = rules.get("grading_weights", {})
+                if w:
+                    syllabus_weights = w
+                    break
+            except Exception:
+                pass
+
+    # Current course grade (for GPA impact)
+    course_grades = db.get_grades_for_course(a.get("course_id", "")) if a.get("course_id") else []
+    current_avg = None
+    if course_grades:
+        valid = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
+        current_avg = round(sum(valid) / len(valid), 1) if valid else None
 
     return render_template(
         "assignment_detail.html",
@@ -242,6 +396,15 @@ def assignment_detail(assignment_id):
         study_suggestions=study_suggestions,
         watch_outs=watch_outs,
         reasoning=reasoning,
+        time_breakdown=time_breakdown,
+        course_strategy_note=course_strategy_note,
+        note_text=note_text,
+        checklist=checklist,
+        checklist_stats=checklist_stats,
+        time_spent=time_spent,
+        grade_obj=grade_obj,
+        syllabus_weights=syllabus_weights,
+        current_avg=current_avg,
     )
 
 
@@ -249,7 +412,17 @@ def assignment_detail(assignment_id):
 def assignments_page():
     assignments_raw = db.get_upcoming_assignments(days_ahead=90)
     assignments = [_enrich_assignment(a) for a in assignments_raw]
-    return render_template("assignments.html", assignments=assignments, total=len(assignments))
+
+    # Attach checklist stats for completion % display
+    for a in assignments:
+        stats = db.get_checklist_stats(a["id"])
+        a["checklist_stats"] = stats
+
+    courses = db.get_courses()
+    course_names = sorted(set(a["course_name"] for a in assignments if a.get("course_name")))
+    total_hours = round(sum(a.get("estimated_hours") or 0 for a in assignments), 1)
+    return render_template("assignments.html", assignments=assignments, total=len(assignments),
+                           courses=courses, course_names=course_names, total_hours=total_hours)
 
 
 @app.route("/exams")
@@ -409,6 +582,246 @@ def reanalyze_all():
     except Exception:
         pass
     return jsonify({"status": "re-analysis started — refresh in a minute"})
+
+
+# ─── Grades ───────────────────────────────────────────────────────────────────
+
+def _letter_grade(pct):
+    if pct is None:
+        return "?"
+    if pct >= 93: return "A"
+    if pct >= 90: return "A-"
+    if pct >= 87: return "B+"
+    if pct >= 83: return "B"
+    if pct >= 80: return "B-"
+    if pct >= 77: return "C+"
+    if pct >= 73: return "C"
+    if pct >= 70: return "C-"
+    if pct >= 60: return "D"
+    return "F"
+
+def _grade_color(pct):
+    if pct is None: return "muted"
+    if pct >= 90: return "green"
+    if pct >= 80: return "yellow"
+    return "red"
+
+
+@app.route("/grades")
+def grades_page():
+    courses = db.get_courses()
+    all_grades = db.get_all_grades()
+
+    course_summaries = []
+    for c in courses:
+        cid = c["id"]
+        course_grades = [g for g in all_grades if str(g.get("course_id")) == str(cid)]
+        if not course_grades:
+            course_summaries.append({
+                "id": cid, "name": c["name"], "code": c.get("code", ""),
+                "graded_count": 0, "current_avg": None, "letter": "?",
+                "color": "muted", "target": db.get_grade_goal(cid),
+                "grades": [], "on_track": None,
+            })
+            continue
+
+        valid_pcts = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
+        current_avg = round(sum(valid_pcts) / len(valid_pcts), 1) if valid_pcts else None
+        target = db.get_grade_goal(cid)
+        on_track = (current_avg >= target) if current_avg is not None else None
+
+        # "What do I need on the final?" calc
+        # We need: target = (current_avg * weight_so_far + final_score * final_weight) / 100
+        # Simplified: assume final exam is 30% if no syllabus data
+        syllabi = db.get_syllabus(cid)
+        final_weight = 0.30
+        for s in syllabi:
+            try:
+                rules = json.loads(s["rules_json"]) if s.get("rules_json") else {}
+                gw = rules.get("grading_weights", {})
+                for k, v in gw.items():
+                    if "final" in k.lower() or "exam" in k.lower():
+                        try:
+                            final_weight = float(str(v).replace("%", "")) / 100
+                        except Exception:
+                            pass
+                        break
+            except Exception:
+                pass
+
+        current_weight = 1.0 - final_weight
+        if current_avg is not None and final_weight > 0:
+            needed_on_final = (target - current_avg * current_weight) / final_weight
+        else:
+            needed_on_final = None
+
+        course_summaries.append({
+            "id": cid, "name": c["name"], "code": c.get("code", ""),
+            "graded_count": len(course_grades),
+            "current_avg": current_avg,
+            "letter": _letter_grade(current_avg),
+            "color": _grade_color(current_avg),
+            "target": target,
+            "on_track": on_track,
+            "needed_on_final": round(needed_on_final, 1) if needed_on_final is not None else None,
+            "final_weight_pct": round(final_weight * 100),
+            "grades": course_grades[:5],  # last 5
+        })
+
+    return render_template("grades.html",
+        course_summaries=course_summaries,
+        letter_grade=_letter_grade,
+        grade_color=_grade_color,
+    )
+
+
+@app.route("/api/grade/<assignment_id>", methods=["POST"])
+def enter_grade(assignment_id):
+    data = request.get_json()
+    points_earned = float(data.get("points_earned", 0))
+    points_possible = float(data.get("points_possible", 100))
+    a = db.get_assignment_by_id(assignment_id)
+    course_id = a["course_id"] if a else ""
+    grade_pct = db.upsert_grade(assignment_id, course_id, points_earned, points_possible)
+    return jsonify({"status": "ok", "grade_pct": grade_pct, "letter": _letter_grade(grade_pct)})
+
+
+@app.route("/api/grade/<assignment_id>", methods=["DELETE"])
+def delete_grade(assignment_id):
+    db.delete_grade(assignment_id)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/grade-goal/<course_id>", methods=["POST"])
+def set_grade_goal(course_id):
+    data = request.get_json()
+    target = float(data.get("target", 90))
+    db.set_grade_goal(course_id, target)
+    return jsonify({"status": "ok"})
+
+
+# ─── Study Plan ───────────────────────────────────────────────────────────────
+
+@app.route("/study-plan")
+def study_plan_page():
+    from config import Config
+    plan = db.get_study_plan()
+
+    # Group by date
+    from collections import defaultdict
+    by_date = defaultdict(list)
+    for entry in plan:
+        by_date[entry["date"]].append(entry)
+
+    now = datetime.now()
+    days_list = []
+    for i in range(14):
+        day_date = (now + timedelta(days=i)).date()
+        date_str = day_date.isoformat()
+        entries = by_date.get(date_str, [])
+        total = round(sum(e.get("hours_planned", 0) for e in entries), 1)
+        days_list.append({
+            "date_str": date_str,
+            "date_fmt": day_date.strftime("%A, %b %-d"),
+            "is_today": i == 0,
+            "entries": entries,
+            "total_hours": total,
+        })
+
+    has_plan = bool(plan)
+    return render_template("study_plan.html", days_list=days_list, has_plan=has_plan)
+
+
+@app.route("/api/study-plan/generate", methods=["POST"])
+def generate_study_plan():
+    from config import Config
+    from modules.analyzer import generate_study_plan as _gen_plan
+
+    assignments = db.get_upcoming_assignments(days_ahead=14)
+    exams = db.get_upcoming_exams(days_ahead=14)
+    entries = _gen_plan(assignments, exams, wake_hour=Config.WAKE_HOUR,
+                        stop_hour=Config.NO_WORK_AFTER_HOUR, days=14)
+    db.save_study_plan(entries)
+    return jsonify({"status": "ok", "entries": len(entries)})
+
+
+# ─── Announcements ────────────────────────────────────────────────────────────
+
+HIGHLIGHT_KEYWORDS = [
+    "due date", "extended", "extra credit", "exam", "cancelled", "canceled",
+    "moved", "postponed", "bonus", "important", "reminder", "grade"
+]
+
+@app.route("/announcements")
+def announcements_page():
+    announcements = db.get_announcements(limit=100)
+    # Mark keywords for highlight
+    for ann in announcements:
+        text = ((ann.get("title") or "") + " " + (ann.get("message") or "")).lower()
+        ann["highlighted"] = any(kw in text for kw in HIGHLIGHT_KEYWORDS)
+        # Format posted_at
+        try:
+            dt = datetime.fromisoformat(ann["posted_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            ann["posted_fmt"] = dt.strftime("%b %-d, %Y")
+        except Exception:
+            ann["posted_fmt"] = ann.get("posted_at", "")[:10]
+    # Mark all as read
+    db.mark_all_announcements_read()
+    return render_template("announcements.html", announcements=announcements)
+
+
+@app.route("/api/announcement/<canvas_id>/read", methods=["POST"])
+def mark_announcement_read(canvas_id):
+    db.mark_announcement_read(canvas_id)
+    return jsonify({"status": "ok"})
+
+
+# ─── Assignment Notes & Checklist ─────────────────────────────────────────────
+
+@app.route("/api/assignment/<assignment_id>/note", methods=["POST"])
+def save_note(assignment_id):
+    data = request.get_json()
+    note = data.get("note", "")
+    db.upsert_assignment_note(assignment_id, note)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/assignment/<assignment_id>/checklist", methods=["POST"])
+def add_checklist_item(assignment_id):
+    data = request.get_json()
+    item_text = (data.get("item_text") or "").strip()
+    if not item_text:
+        return jsonify({"error": "empty"}), 400
+    item_id = db.add_checklist_item(assignment_id, item_text)
+    return jsonify({"status": "ok", "id": item_id})
+
+
+@app.route("/api/checklist/<int:item_id>/toggle", methods=["POST"])
+def toggle_checklist(item_id):
+    db.toggle_checklist_item(item_id)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/checklist/<int:item_id>", methods=["DELETE"])
+def delete_checklist(item_id):
+    db.delete_checklist_item(item_id)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/assignment/<assignment_id>/time", methods=["POST"])
+def log_time(assignment_id):
+    data = request.get_json()
+    minutes = int(data.get("minutes", 0))
+    if minutes > 0:
+        db.log_time_spent(assignment_id, minutes)
+    total = db.get_time_spent(assignment_id)
+    return jsonify({"status": "ok", "total_minutes": total})
+
+
+@app.route("/api/assignment/<assignment_id>/bulk-done", methods=["POST"])
+def bulk_mark_done(assignment_id):
+    db.update_assignment_status(assignment_id, "submitted")
+    return jsonify({"status": "ok"})
 
 
 def run(port=5000, debug=False, use_reloader=True):

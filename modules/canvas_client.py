@@ -135,3 +135,16 @@ def get_calendar_events(course_ids):
 def is_syllabus_file(filename: str) -> bool:
     name = filename.lower()
     return "syllabus" in name or "syllab" in name or "course_info" in name or "course info" in name
+
+def get_announcements(course_id, per_page=10):
+    """Return recent announcements for a course."""
+    try:
+        items = _get(f"{BASE}/api/v1/courses/{course_id}/discussion_topics", params={
+            "only_announcements": "true",
+            "per_page": per_page,
+            "order_by": "recent_activity"
+        })
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        logger.error(f"Failed to fetch announcements for course {course_id}: {e}")
+        return []

@@ -108,6 +108,64 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS grades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id TEXT,
+            course_id TEXT,
+            points_earned REAL,
+            points_possible REAL,
+            grade_pct REAL,
+            entered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS course_grade_goals (
+            course_id TEXT PRIMARY KEY,
+            target_grade_pct REAL DEFAULT 90.0
+        );
+
+        CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canvas_id TEXT UNIQUE,
+            course_id TEXT,
+            course_name TEXT,
+            title TEXT,
+            message TEXT,
+            posted_at TIMESTAMP,
+            is_read INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS assignment_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id TEXT UNIQUE,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS assignment_checklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id TEXT,
+            item_text TEXT,
+            is_done INTEGER DEFAULT 0,
+            position INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS study_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            assignment_id TEXT,
+            hours_planned REAL,
+            note TEXT,
+            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS time_spent (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id TEXT,
+            minutes INTEGER,
+            logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
 
     conn.commit()
@@ -408,3 +466,279 @@ def set_pref(key, value):
     conn.execute("INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+
+
+# --- Grades ---
+
+def upsert_grade(assignment_id, course_id, points_earned, points_possible):
+    conn = get_conn()
+    grade_pct = (points_earned / points_possible * 100) if points_possible else None
+    # Check if grade exists
+    existing = conn.execute("SELECT id FROM grades WHERE assignment_id=?", (assignment_id,)).fetchone()
+    if existing:
+        conn.execute("""
+            UPDATE grades SET points_earned=?, points_possible=?, grade_pct=?, entered_at=CURRENT_TIMESTAMP
+            WHERE assignment_id=?
+        """, (points_earned, points_possible, grade_pct, assignment_id))
+    else:
+        conn.execute("""
+            INSERT INTO grades (assignment_id, course_id, points_earned, points_possible, grade_pct)
+            VALUES (?, ?, ?, ?, ?)
+        """, (assignment_id, course_id, points_earned, points_possible, grade_pct))
+    conn.commit()
+    conn.close()
+    return grade_pct
+
+def get_grade_for_assignment(assignment_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM grades WHERE assignment_id=?", (assignment_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_grades_for_course(course_id):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT g.*, a.title, a.points_possible as a_points_possible
+        FROM grades g
+        LEFT JOIN assignments a ON a.id = g.assignment_id
+        WHERE g.course_id=?
+        ORDER BY g.entered_at DESC
+    """, (str(course_id),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_all_grades():
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT g.*, a.title, a.course_name
+        FROM grades g
+        LEFT JOIN assignments a ON a.id = g.assignment_id
+        ORDER BY g.entered_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def set_grade_goal(course_id, target_pct):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO course_grade_goals (course_id, target_grade_pct)
+        VALUES (?, ?)
+        ON CONFLICT(course_id) DO UPDATE SET target_grade_pct=excluded.target_grade_pct
+    """, (str(course_id), target_pct))
+    conn.commit()
+    conn.close()
+
+def get_grade_goal(course_id):
+    conn = get_conn()
+    row = conn.execute("SELECT target_grade_pct FROM course_grade_goals WHERE course_id=?", (str(course_id),)).fetchone()
+    conn.close()
+    return row["target_grade_pct"] if row else 90.0
+
+def delete_grade(assignment_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM grades WHERE assignment_id=?", (assignment_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- Announcements ---
+
+def upsert_announcement(canvas_id, course_id, course_name, title, message, posted_at):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO announcements (canvas_id, course_id, course_name, title, message, posted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(canvas_id) DO UPDATE SET
+            title=excluded.title,
+            message=excluded.message,
+            course_name=excluded.course_name
+    """, (str(canvas_id), str(course_id), course_name, title, message, posted_at))
+    conn.commit()
+    conn.close()
+
+def get_announcements(limit=50):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM announcements ORDER BY posted_at DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_unread_announcement_count():
+    conn = get_conn()
+    row = conn.execute("SELECT COUNT(*) as cnt FROM announcements WHERE is_read=0").fetchone()
+    conn.close()
+    return row["cnt"] if row else 0
+
+def mark_announcement_read(canvas_id):
+    conn = get_conn()
+    conn.execute("UPDATE announcements SET is_read=1 WHERE canvas_id=?", (str(canvas_id),))
+    conn.commit()
+    conn.close()
+
+def mark_all_announcements_read():
+    conn = get_conn()
+    conn.execute("UPDATE announcements SET is_read=1")
+    conn.commit()
+    conn.close()
+
+
+# --- Assignment Notes ---
+
+def upsert_assignment_note(assignment_id, note):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO assignment_notes (assignment_id, note)
+        VALUES (?, ?)
+        ON CONFLICT(assignment_id) DO UPDATE SET note=excluded.note, updated_at=CURRENT_TIMESTAMP
+    """, (assignment_id, note))
+    conn.commit()
+    conn.close()
+
+def get_assignment_note(assignment_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM assignment_notes WHERE assignment_id=?", (assignment_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# --- Assignment Checklist ---
+
+def get_checklist(assignment_id):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM assignment_checklist WHERE assignment_id=? ORDER BY position ASC, id ASC
+    """, (assignment_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def add_checklist_item(assignment_id, item_text):
+    conn = get_conn()
+    max_pos = conn.execute(
+        "SELECT COALESCE(MAX(position), 0) as mp FROM assignment_checklist WHERE assignment_id=?",
+        (assignment_id,)
+    ).fetchone()["mp"]
+    c = conn.execute("""
+        INSERT INTO assignment_checklist (assignment_id, item_text, position)
+        VALUES (?, ?, ?)
+    """, (assignment_id, item_text, max_pos + 1))
+    item_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return item_id
+
+def toggle_checklist_item(item_id):
+    conn = get_conn()
+    conn.execute("UPDATE assignment_checklist SET is_done = 1 - is_done WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def delete_checklist_item(item_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM assignment_checklist WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def get_checklist_stats(assignment_id):
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as total, SUM(is_done) as done
+        FROM assignment_checklist WHERE assignment_id=?
+    """, (assignment_id,)).fetchone()
+    conn.close()
+    total = row["total"] or 0
+    done = row["done"] or 0
+    return {"total": total, "done": done, "pct": round(done / total * 100) if total > 0 else 0}
+
+
+# --- Time Spent ---
+
+def log_time_spent(assignment_id, minutes):
+    conn = get_conn()
+    conn.execute("INSERT INTO time_spent (assignment_id, minutes) VALUES (?, ?)", (assignment_id, minutes))
+    conn.commit()
+    conn.close()
+
+def get_time_spent(assignment_id):
+    conn = get_conn()
+    row = conn.execute("SELECT COALESCE(SUM(minutes), 0) as total FROM time_spent WHERE assignment_id=?",
+                       (assignment_id,)).fetchone()
+    conn.close()
+    return row["total"] if row else 0
+
+def get_total_time_this_week():
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT COALESCE(SUM(minutes), 0) as total FROM time_spent
+        WHERE logged_at >= datetime('now', '-7 days')
+    """).fetchone()
+    conn.close()
+    return row["total"] if row else 0
+
+
+# --- Study Plan ---
+
+def save_study_plan(entries):
+    """entries: list of dicts with date, assignment_id, hours_planned, note"""
+    conn = get_conn()
+    conn.execute("DELETE FROM study_plan")
+    for e in entries:
+        conn.execute("""
+            INSERT INTO study_plan (date, assignment_id, hours_planned, note)
+            VALUES (?, ?, ?, ?)
+        """, (e["date"], e["assignment_id"], e["hours_planned"], e.get("note", "")))
+    conn.commit()
+    conn.close()
+
+def get_study_plan():
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT sp.*, a.title, a.course_name, a.due_at, a.priority, a.difficulty
+        FROM study_plan sp
+        LEFT JOIN assignments a ON a.id = sp.assignment_id
+        ORDER BY sp.date ASC, sp.id ASC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_completed_days_streak():
+    """Return consecutive days with at least one assignment marked submitted/complete."""
+    from datetime import date, timedelta
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT DATE(updated_at) as day
+        FROM assignments
+        WHERE status IN ('submitted', 'complete')
+        GROUP BY DATE(updated_at)
+        ORDER BY day DESC
+    """).fetchall()
+    conn.close()
+    days = [r["day"] for r in rows]
+    if not days:
+        return 0
+    streak = 0
+    check = date.today()
+    for d in days:
+        try:
+            d_date = datetime.strptime(d, "%Y-%m-%d").date() if isinstance(d, str) else d
+        except Exception:
+            continue
+        if d_date == check:
+            streak += 1
+            check = check - timedelta(days=1)
+        elif d_date == check + timedelta(days=1) and streak == 0:
+            # Allow streak starting yesterday
+            streak += 1
+            check = d_date - timedelta(days=1)
+        else:
+            break
+    return streak
+
+def get_semester_completed_count():
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM assignments
+        WHERE status IN ('submitted', 'complete')
+    """).fetchone()
+    conn.close()
+    return row["cnt"] if row else 0

@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %} — Grades{% endblock %}
+
+{% block head %}
+<style>
+  .grade-course-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .grade-course-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+  }
+  .grade-course-name { font-size: 16px; font-weight: 600; }
+  .grade-course-code { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .grade-big {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .grade-letter {
+    font-size: 18px;
+    font-weight: 700;
+    margin-left: 8px;
+  }
+  .grade-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .grade-bar-wrap { margin: 12px 0; }
+  .grade-bar {
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .grade-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.4s;
+  }
+  .grade-bar-target {
+    position: absolute;
+    top: -2px;
+    height: 12px;
+    width: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+  }
+  .grade-stats-row {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .grade-stat { }
+  .grade-stat-val { font-weight: 600; }
+  .grade-stat-label { color: var(--muted); font-size: 11px; }
+  .need-score {
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    margin-top: 8px;
+    display: inline-block;
+  }
+  .need-easy { background: rgba(74,222,128,0.1); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+  .need-medium { background: rgba(251,191,36,0.1); color: var(--yellow); border: 1px solid rgba(251,191,36,0.2); }
+  .need-hard { background: rgba(248,113,113,0.1); color: var(--red); border: 1px solid rgba(248,113,113,0.2); }
+  .need-impossible { background: rgba(248,113,113,0.2); color: var(--red); border: 1px solid rgba(248,113,113,0.4); font-weight: 700; }
+  .recent-grades { margin-top: 12px; }
+  .recent-grade-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .recent-grade-row:last-child { border-bottom: none; }
+  .goal-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    width: 60px;
+    text-align: center;
+  }
+  .goal-input:focus { outline: none; border-color: var(--accent); }
+  .on-track { color: var(--green); font-size: 12px; font-weight: 600; }
+  .off-track { color: var(--red); font-size: 12px; font-weight: 600; }
+  .no-grade-yet { color: var(--muted); font-size: 13px; font-style: italic; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Grade Tracker</h1>
+<p class="subtitle">Track your grades and stay on target</p>
+
+{% if not course_summaries or course_summaries | selectattr('graded_count') | list | length == 0 %}
+<div class="card" style="padding:32px; text-align:center;">
+  <div style="font-size:18px; margin-bottom:8px; color:var(--muted);">No grades entered yet.</div>
+  <div style="font-size:13px; color:var(--muted);">Open any assignment and scroll down to enter your score.</div>
+</div>
+{% endif %}
+
+{% for c in course_summaries %}
+<div class="grade-course-card">
+  <div class="grade-course-header">
+    <div>
+      <div class="grade-course-name">{{ c.name }}</div>
+      <div class="grade-course-code">{{ c.code }}</div>
+    </div>
+    <div style="text-align:right;">
+      {% if c.current_avg is not none %}
+      <div>
+        <span class="grade-big" style="color:var(--{{ c.color }})">{{ c.current_avg }}%</span>
+        <span class="grade-letter" style="color:var(--{{ c.color }})">{{ c.letter }}</span>
+      </div>
+      <div class="grade-meta">{{ c.graded_count }} graded &nbsp;·&nbsp;
+        {% if c.on_track %}<span class="on-track">On track for target</span>
+        {% else %}<span class="off-track">Below target</span>{% endif %}
+      </div>
+      {% else %}
+      <div class="no-grade-yet">No grades yet</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if c.current_avg is not none %}
+  <!-- Grade progress bar -->
+  <div class="grade-bar-wrap">
+    <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-bottom:4px;">
+      <span>0%</span>
+      <span style="color:var(--accent)">Target: {{ c.target }}%</span>
+      <span>100%</span>
+    </div>
+    <div class="grade-bar">
+      <div class="grade-bar-fill" style="width:{% if c.current_avg > 100 %}100{% else %}{{ c.current_avg }}{% endif %}%; background:var(--{{ c.color }});"></div>
+      <div class="grade-bar-target" style="left:{{ c.target }}%;"></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="grade-stats-row">
+    <div class="grade-stat">
+      <div class="grade-stat-val">{{ c.graded_count }}</div>
+      <div class="grade-stat-label">Graded</div>
+    </div>
+    {% if c.current_avg is not none %}
+    <div class="grade-stat">
+      <div class="grade-stat-val">{{ c.current_avg }}%</div>
+      <div class="grade-stat-label">Current Avg</div>
+    </div>
+    {% endif %}
+    <div class="grade-stat" style="display:flex; align-items:center; gap:8px;">
+      <div>
+        <div class="grade-stat-label">Target</div>
+        <input class="goal-input" type="number" min="0" max="100" value="{{ c.target }}"
+               onchange="setGoal('{{ c.id }}', this.value)" />
+      </div>
+    </div>
+    {% if c.needed_on_final is not none %}
+    <div class="grade-stat">
+      <div class="grade-stat-val">{{ c.needed_on_final }}%</div>
+      <div class="grade-stat-label">Needed on Final ({{ c.final_weight_pct }}%)</div>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if c.needed_on_final is not none %}
+    {% set nof = c.needed_on_final %}
+    {% if nof <= 70 %}
+    <div class="need-score need-easy">You need {{ nof }}% on the final to hit your {{ c.target }}% goal — very achievable.</div>
+    {% elif nof <= 85 %}
+    <div class="need-score need-medium">You need {{ nof }}% on the final — solid study effort required.</div>
+    {% elif nof <= 100 %}
+    <div class="need-score need-hard">You need {{ nof }}% on the final — time to get serious.</div>
+    {% else %}
+    <div class="need-score need-impossible">You need {{ nof }}% on the final — target may be out of reach without extra credit.</div>
+    {% endif %}
+  {% endif %}
+
+  {% if c.grades %}
+  <div class="recent-grades">
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Recent Grades</div>
+    {% for g in c.grades %}
+    <div class="recent-grade-row">
+      <span style="color:var(--text);">{{ g.title or 'Assignment' }}</span>
+      <span>
+        <span style="color:{% if g.grade_pct >= 90 %}var(--green){% elif g.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %}; font-weight:600;">
+          {{ g.points_earned }}/{{ g.points_possible }} ({{ "%.1f"|format(g.grade_pct) }}%)
+        </span>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<script>
+async function setGoal(courseId, target) {
+  await fetch(`/api/grade-goal/${courseId}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({target: parseFloat(target)})
+  });
+}
+</script>
+{% endblock %}

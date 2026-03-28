@@ -10,7 +10,7 @@
     display: grid;
     grid-template-columns: repeat(7, 1fr);
     gap: 8px;
-    margin-bottom: 24px;
+    margin-bottom: 8px;
   }
   .cal-header {
     display: grid;
@@ -26,22 +26,50 @@
     letter-spacing: 0.4px;
     padding: 0 8px;
   }
+  .cal-week-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 20px 0 6px;
+  }
   .cal-week-label {
     font-size: 11px;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin: 20px 0 6px;
     font-weight: 600;
   }
+  .cal-week-total {
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  /* Heatmap row */
+  .cal-heat-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .cal-heat-cell {
+    height: 8px;
+    border-radius: 4px;
+    transition: opacity 0.2s;
+  }
+  .heat-none    { background: var(--surface2); }
+  .heat-light   { background: rgba(74,222,128,0.5); }
+  .heat-moderate{ background: rgba(251,191,36,0.6); }
+  .heat-heavy   { background: rgba(251,146,60,0.7); }
+  .heat-overwhelming { background: rgba(248,113,113,0.8); }
   .cal-cell {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px 8px;
     min-height: 100px;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, transform 0.15s;
   }
+  .cal-cell:hover { border-color: var(--accent-dim); }
   .cal-cell.today {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent-dim);
@@ -92,15 +120,39 @@
     color: var(--border);
     margin-top: 4px;
   }
+  .heat-legend {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 20px; font-size: 11px; color: var(--muted);
+  }
+  .heat-legend-dot { width: 12px; height: 8px; border-radius: 3px; display: inline-block; }
 </style>
 
-{% set day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] %}
+<!-- Heatmap legend -->
+<div class="heat-legend">
+  Intensity:
+  <span class="heat-legend-dot heat-none"></span> None
+  <span class="heat-legend-dot heat-light"></span> Light
+  <span class="heat-legend-dot heat-moderate"></span> Moderate
+  <span class="heat-legend-dot heat-heavy"></span> Heavy
+  <span class="heat-legend-dot heat-overwhelming"></span> Overwhelming
+</div>
+
 {% set week_labels = ["This Week", "Next Week", "Week 3", "Week 4"] %}
 
 {% for week in weeks %}
-<div class="cal-week-label">{{ week_labels[loop.index0] }}</div>
+<div class="cal-week-row">
+  <div class="cal-week-label">{{ week_labels[loop.index0] }}</div>
+  <div class="cal-week-total">~{{ week.week_total_hours }}h total</div>
+</div>
+
+<!-- Heatmap row -->
+<div class="cal-heat-grid">
+  {% for day in week.days %}
+  <div class="cal-heat-cell {{ day.heat_class }}" title="{{ day.date_str }}: intensity {{ day.heat_intensity }}"></div>
+  {% endfor %}
+</div>
+
 <div class="cal-grid">
-  {% for day in week %}
+  {% for day in week.days %}
   <div class="cal-cell {% if day.is_today %}today{% endif %}">
     <div class="cal-cell-day" style="color:{% if day.is_today %}var(--accent){% else %}var(--muted){% endif %};">
       {{ day.day_name[:3] if not day.is_today else "Today" }}

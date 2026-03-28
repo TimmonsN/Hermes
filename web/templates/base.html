@@ -38,10 +38,12 @@
       width: 200px;
       background: var(--surface);
       border-right: 1px solid var(--border);
-      padding: 24px 0;
+      padding: 24px 0 0;
       flex-shrink: 0;
       position: fixed;
       top: 0; left: 0; bottom: 0;
+      display: flex;
+      flex-direction: column;
     }
 
     .sidebar-logo {
@@ -161,6 +163,49 @@
     .alert { padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
     .alert-warning { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: var(--yellow); }
     .alert-danger { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.3); color: var(--red); }
+    .alert-info { background: rgba(124,108,255,0.1); border: 1px solid rgba(124,108,255,0.3); color: var(--accent); }
+
+    /* Unread badge */
+    .nav-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 16px; height: 16px; border-radius: 8px;
+      background: var(--red); color: white; font-size: 9px; font-weight: 700;
+      margin-left: auto; padding: 0 4px;
+    }
+
+    /* Streak badge */
+    .streak-badge {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 20px; color: var(--orange); font-size: 12px; font-weight: 600;
+      border-top: 1px solid var(--border); margin-top: auto;
+    }
+
+    /* Card hover animation */
+    .card { transition: border-color 0.15s, transform 0.15s; }
+    .card:hover { border-color: var(--accent-dim); }
+
+    /* Quick stats bar */
+    .quick-stats {
+      display: flex; gap: 0; border: 1px solid var(--border); border-radius: 10px;
+      overflow: hidden; margin-bottom: 20px;
+    }
+    .quick-stat {
+      flex: 1; padding: 12px 16px; text-align: center; border-right: 1px solid var(--border);
+    }
+    .quick-stat:last-child { border-right: none; }
+    .quick-stat-val { font-size: 20px; font-weight: 700; color: var(--text); }
+    .quick-stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* Proactive warning cards */
+    .warning-card {
+      display: flex; gap: 12px; align-items: flex-start;
+      padding: 14px 18px; border-radius: 10px; margin-bottom: 12px;
+      font-size: 13px; font-weight: 500;
+    }
+    .warning-card.danger { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.3); color: var(--red); }
+    .warning-card.warning { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: var(--yellow); }
+    .warning-card.info { background: rgba(124,108,255,0.1); border: 1px solid rgba(124,108,255,0.3); color: var(--accent); }
+    .warning-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
   </style>
   {% block head %}{% endblock %}
 </head>
@@ -171,7 +216,7 @@
         Hermes
         <span>OSU School Buddy</span>
       </div>
-      <div class="nav">
+      <div class="nav" style="flex:1;">
         <a href="/" class="{% if request.path == '/' %}active{% endif %}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           Dashboard
@@ -188,6 +233,19 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
           Exams
         </a>
+        <a href="/grades" class="{% if request.path == '/grades' %}active{% endif %}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          Grades
+        </a>
+        <a href="/study-plan" class="{% if request.path == '/study-plan' %}active{% endif %}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Study Plan
+        </a>
+        <a href="/announcements" class="{% if request.path == '/announcements' %}active{% endif %}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          Alerts
+          {% if unread_announcements > 0 %}<span class="nav-badge">{{ unread_announcements }}</span>{% endif %}
+        </a>
         <a href="/chat" class="{% if request.path == '/chat' %}active{% endif %}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           Chat
@@ -197,6 +255,12 @@
           Courses
         </a>
       </div>
+      {% if streak > 0 %}
+      <div class="streak-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        {{ streak }}-day streak
+      </div>
+      {% endif %}
     </nav>
     <main class="main">
       {% block content %}{% endblock %}

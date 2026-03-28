@@ -11,9 +11,34 @@
 </div>
 <p class="subtitle">
   {{ today_str }} &nbsp;·&nbsp; {{ active_courses }} active courses &nbsp;·&nbsp; {{ total_upcoming }} upcoming
-  {% if today_hours %}&nbsp;·&nbsp; <span style="color:var(--accent)">~{{ today_hours }}h due today</span>{% endif %}
-  {% if week_hours %}&nbsp;·&nbsp; ~{{ week_hours }}h this week{% endif %}
+  {% if avg_grade %}&nbsp;·&nbsp; <span style="color:{% if avg_grade >= 90 %}var(--green){% elif avg_grade >= 80 %}var(--yellow){% else %}var(--red){% endif %}">avg {{ avg_grade }}%</span>{% endif %}
 </p>
+
+<!-- Quick stats bar -->
+<div class="quick-stats">
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--red)">{{ today_hours }}h</div>
+    <div class="quick-stat-label">Due Today</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--yellow)">{{ week_hours }}h</div>
+    <div class="quick-stat-label">This Week</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--accent)">{{ week_hours_logged }}h</div>
+    <div class="quick-stat-label">Logged This Week</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--green)">{{ completed_count }}</div>
+    <div class="quick-stat-label">Done This Semester</div>
+  </div>
+  {% if avg_grade %}
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:{% if avg_grade >= 90 %}var(--green){% elif avg_grade >= 80 %}var(--yellow){% else %}var(--red){% endif %}">{{ avg_grade }}%</div>
+    <div class="quick-stat-label">Avg Grade</div>
+  </div>
+  {% endif %}
+</div>
 
 <script>
 async function triggerSync() {
@@ -28,6 +53,15 @@ async function reanalyze() {
   setTimeout(() => { location.reload(); }, 60000);
 }
 </script>
+
+{% if proactive_warnings %}
+  {% for w in proactive_warnings %}
+  <div class="warning-card {{ w.level }}">
+    <div class="warning-icon">{% if w.icon == 'fire' %}🔥{% elif w.icon == 'exam' %}📝{% elif w.icon == 'stack' %}📚{% elif w.icon == 'clock' %}⏰{% elif w.icon == 'bonus' %}⭐{% else %}⚠️{% endif %}</div>
+    <div>{{ w.message }}</div>
+  </div>
+  {% endfor %}
+{% endif %}
 
 {% if collision_alerts %}
   {% for col in collision_alerts %}

@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %} — Study Plan{% endblock %}
+
+{% block head %}
+<style>
+  .plan-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 28px;
+  }
+  .plan-day {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .plan-day-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  .plan-day-name {
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .plan-day-total {
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .plan-day.today-day .plan-day-header {
+    background: var(--accent-dim);
+    border-bottom-color: var(--accent);
+  }
+  .plan-day.today-day .plan-day-name {
+    color: var(--accent);
+  }
+  .plan-day.empty-day .plan-day-header {
+    background: var(--surface);
+  }
+  .plan-entry {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .plan-entry:last-child { border-bottom: none; }
+  .plan-entry-note { color: var(--text); }
+  .plan-entry-hours {
+    font-weight: 600;
+    color: var(--accent);
+    flex-shrink: 0;
+    margin-left: 16px;
+  }
+  .plan-empty {
+    padding: 14px 20px;
+    color: var(--muted);
+    font-size: 13px;
+    font-style: italic;
+  }
+  .empty-state {
+    text-align: center;
+    padding: 60px 40px;
+    color: var(--muted);
+  }
+  .empty-state-title { font-size: 20px; margin-bottom: 8px; color: var(--text); }
+  .empty-state-sub { font-size: 14px; margin-bottom: 24px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="plan-header-row">
+  <div>
+    <h1>Study Plan</h1>
+    <p class="subtitle">14-day schedule based on your assignments and exams</p>
+  </div>
+  <button class="btn btn-primary" onclick="generatePlan()" id="genBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    {% if has_plan %}Regenerate Plan{% else %}Generate Plan{% endif %}
+  </button>
+</div>
+
+{% if not has_plan %}
+<div class="empty-state">
+  <div class="empty-state-title">No study plan yet</div>
+  <div class="empty-state-sub">Click "Generate Plan" to create a 14-day schedule based on your upcoming work.</div>
+  <button class="btn btn-primary" onclick="generatePlan()">Generate My Study Plan</button>
+</div>
+{% else %}
+
+{% for day in days_list %}
+<div class="plan-day {% if day.is_today %}today-day{% endif %} {% if not day.entries %}empty-day{% endif %}">
+  <div class="plan-day-header">
+    <div class="plan-day-name">
+      {% if day.is_today %}Today — {% endif %}{{ day.date_fmt }}
+    </div>
+    {% if day.entries %}
+    <div class="plan-day-total">{{ day.total_hours }}h planned</div>
+    {% endif %}
+  </div>
+  {% if day.entries %}
+    {% for entry in day.entries %}
+    <div class="plan-entry">
+      <div class="plan-entry-note">
+        {% if entry.course_name %}
+        <span style="color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:0.4px;">{{ entry.course_name }}</span>
+        <br>
+        {% endif %}
+        {{ entry.title or entry.note }}
+        {% if entry.due_at %}
+        <span style="color:var(--muted); font-size:11px; margin-left:8px;">due
+          {% set due = entry.due_at[:10] %}{{ due }}
+        </span>
+        {% endif %}
+      </div>
+      <div class="plan-entry-hours">{{ entry.hours_planned }}h</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="plan-empty">Nothing scheduled — free day</div>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% endif %}
+
+<script>
+async function generatePlan() {
+  const btn = document.getElementById('genBtn');
+  btn.textContent = 'Generating...';
+  btn.disabled = true;
+  const resp = await fetch('/api/study-plan/generate', {method: 'POST'});
+  const data = await resp.json();
+  location.reload();
+}
+</script>
+{% endblock %}

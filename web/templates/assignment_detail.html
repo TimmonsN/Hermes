@@ -98,6 +98,167 @@
     font-size: 13px;
   }
   .bonus-block strong { color: var(--accent); }
+  /* Time breakdown */
+  .time-breakdown {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .time-pill {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .time-pill strong { color: var(--text); }
+  /* Notes */
+  .note-textarea {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 12px;
+    resize: vertical;
+    min-height: 100px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+  .note-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .note-saved {
+    font-size: 11px;
+    color: var(--green);
+    margin-top: 4px;
+    display: none;
+  }
+  /* Checklist */
+  .checklist-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .checklist-item:last-child { border-bottom: none; }
+  .checklist-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+  .checklist-text.done {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+  .checklist-delete {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .checklist-delete:hover { color: var(--red); }
+  .checklist-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .checklist-add-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .checklist-add-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+  .checklist-add-input:focus { outline: none; border-color: var(--accent); }
+  /* Time spent */
+  .time-log-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .time-input {
+    width: 80px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .time-input:focus { outline: none; border-color: var(--accent); }
+  /* Grade entry */
+  .grade-entry-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .grade-input {
+    width: 80px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 14px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .grade-input:focus { outline: none; border-color: var(--accent); }
+  .grade-result {
+    font-size: 18px;
+    font-weight: 700;
+  }
+  /* GPA Impact slider */
+  .gpa-slider {
+    width: 100%;
+    accent-color: var(--accent);
+    margin: 12px 0;
+  }
+  .gpa-impact-display {
+    font-size: 28px;
+    font-weight: 700;
+    text-align: center;
+    margin: 8px 0;
+  }
+  .gpa-meta {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .slider-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: -8px;
+  }
 </style>
 {% endblock %}
 
@@ -118,6 +279,10 @@
     {% if a.points_possible %}
     <span class="sep">·</span>
     <span>{{ a.points_possible }} pts</span>
+    {% endif %}
+    {% if checklist_stats.total > 0 %}
+    <span class="sep">·</span>
+    <span style="color:var(--accent)">{{ checklist_stats.done }}/{{ checklist_stats.total }} steps done ({{ checklist_stats.pct }}%)</span>
     {% endif %}
   </div>
 
@@ -144,7 +309,21 @@
     {% if a.assignment_type %}
     <span class="tag">{{ a.assignment_type }}</span>
     {% endif %}
+
+    {% if time_spent > 0 %}
+    <span class="tag" style="color:var(--green);">{{ "%.0f"|format(time_spent / 60) }}h logged</span>
+    {% endif %}
   </div>
+
+  {% if time_breakdown %}
+  <div class="time-breakdown">
+    {% for phase, hrs in time_breakdown.items() %}
+    {% if hrs and hrs > 0 %}
+    <div class="time-pill"><strong>{{ phase | replace('_', ' ') | title }}</strong>: {{ hrs }}h</div>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 
 <!-- Action row -->
@@ -171,6 +350,69 @@
 <div class="bonus-block" style="background:rgba(74,222,128,0.07); border-color:rgba(74,222,128,0.25);">
   <strong style="color:var(--green);">Resubmission Allowed</strong>
   {% if a.resubmit_details %} — {{ a.resubmit_details }}{% endif %}
+</div>
+{% endif %}
+
+{% if course_strategy_note %}
+<div class="bonus-block" style="background:rgba(124,108,255,0.05); border-color:rgba(124,108,255,0.2);">
+  <strong>Course Impact</strong> — {{ course_strategy_note }}
+</div>
+{% endif %}
+
+<!-- Grade Entry -->
+<div class="info-block">
+  <h3>Grade Received</h3>
+  {% if grade_obj %}
+  <div style="margin-bottom:12px; font-size:14px;">
+    Current grade:
+    <strong style="font-size:18px; color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">
+      {{ grade_obj.points_earned }}/{{ grade_obj.points_possible }} ({{ "%.1f"|format(grade_obj.grade_pct) }}%)
+    </strong>
+    <button onclick="deleteGrade('{{ a.id }}')" class="btn btn-ghost" style="font-size:11px; padding:2px 8px; margin-left:8px; color:var(--muted);">Remove</button>
+  </div>
+  {% endif %}
+  <div class="grade-entry-row">
+    <div>
+      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">Points Earned</div>
+      <input class="grade-input" type="number" id="pts-earned" min="0"
+             value="{{ grade_obj.points_earned if grade_obj else '' }}"
+             placeholder="e.g. 87" />
+    </div>
+    <div style="color:var(--muted); margin-top:16px;">/</div>
+    <div>
+      <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">Points Possible</div>
+      <input class="grade-input" type="number" id="pts-possible" min="1"
+             value="{{ grade_obj.points_possible if grade_obj else (a.points_possible or '') }}"
+             placeholder="{{ a.points_possible or '100' }}" />
+    </div>
+    <div style="margin-top:16px;">
+      <button class="btn btn-primary" onclick="saveGrade('{{ a.id }}')">Save Grade</button>
+    </div>
+    <div class="grade-result" id="grade-result" style="margin-top:12px;
+      {% if grade_obj %}color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %}{% else %}display:none{% endif %};">
+      {% if grade_obj %}{{ "%.1f"|format(grade_obj.grade_pct) }}%{% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- GPA Impact Calculator -->
+{% if a.points_possible %}
+<div class="info-block">
+  <h3>GPA Impact Calculator</h3>
+  {% if current_avg is not none %}
+  <div class="gpa-meta">Current course avg: <strong>{{ current_avg }}%</strong></div>
+  {% else %}
+  <div class="gpa-meta" style="color:var(--muted);">Enter grades in Courses to see real impact. Showing hypothetical.</div>
+  {% endif %}
+  <div class="gpa-meta">Drag to see how your score on this {{ a.points_possible }}-pt assignment affects your grade:</div>
+  <input class="gpa-slider" type="range" min="0" max="100" value="{{ grade_obj.grade_pct | int if grade_obj else 80 }}" id="gpaSlider" oninput="updateGpaImpact(this.value)" />
+  <div class="slider-labels"><span>0%</span><span>50%</span><span>100%</span></div>
+  <div class="gpa-impact-display" id="gpaDisplay">
+    <span id="gpaScore">{{ grade_obj.grade_pct | round(1) if grade_obj else 80 }}%</span>
+    <span style="color:var(--muted); font-size:18px; margin:0 8px;">on this assignment →</span>
+    <span id="gpaCourseAvg" style="color:var(--accent);">calculating...</span>
+  </div>
+  <div style="text-align:center; font-size:16px; font-weight:600; color:var(--muted);" id="gpaLetter"></div>
 </div>
 {% endif %}
 
@@ -220,7 +462,65 @@
 </div>
 {% endif %}
 
+<!-- Notes -->
+<div class="info-block">
+  <h3>My Notes</h3>
+  <textarea class="note-textarea" id="noteArea" placeholder="Jot down your thoughts, plans, or reminders for this assignment..."
+    onblur="saveNote('{{ a.id }}', this.value)">{{ note_text }}</textarea>
+  <div class="note-saved" id="noteSaved">Saved</div>
+</div>
+
+<!-- Checklist -->
+<div class="info-block">
+  <h3>Progress Checklist</h3>
+  {% if checklist_stats.total > 0 %}
+  <div class="checklist-progress">
+    <div class="progress-bar" style="flex:1; height:6px;">
+      <div class="progress-fill" style="width:{{ checklist_stats.pct }}%;"></div>
+    </div>
+    <span>{{ checklist_stats.done }}/{{ checklist_stats.total }} ({{ checklist_stats.pct }}%)</span>
+  </div>
+  {% endif %}
+
+  <div id="checklist-container">
+    {% for item in checklist %}
+    <div class="checklist-item" id="ci-{{ item.id }}">
+      <input type="checkbox" class="checklist-checkbox"
+             {% if item.is_done %}checked{% endif %}
+             onchange="toggleItem({{ item.id }}, this)" />
+      <span class="checklist-text {% if item.is_done %}done{% endif %}" id="ct-{{ item.id }}">{{ item.item_text }}</span>
+      <button class="checklist-delete" onclick="deleteItem({{ item.id }})" title="Delete">×</button>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="checklist-add-row">
+    <input class="checklist-add-input" type="text" id="newItem"
+           placeholder="Add a step (e.g. 'Read chapter 3')"
+           onkeydown="if(event.key==='Enter') addItem('{{ a.id }}')" />
+    <button class="btn btn-ghost" onclick="addItem('{{ a.id }}')">Add</button>
+  </div>
+</div>
+
+<!-- Time Logger -->
+<div class="info-block">
+  <h3>Time Spent</h3>
+  <div style="font-size:13px; color:var(--muted); margin-bottom:8px;">
+    Total logged: <strong style="color:var(--text);" id="totalTime">{{ "%.0f"|format(time_spent) }} min ({{ "%.1f"|format(time_spent / 60) }}h)</strong>
+    {% if a.estimated_hours %} / ~{{ a.estimated_hours }}h estimated{% endif %}
+  </div>
+  <div class="time-log-row">
+    <input class="time-input" type="number" id="timeInput" min="1" placeholder="min" />
+    <button class="btn btn-ghost" onclick="logTime('{{ a.id }}')">Log Time</button>
+    <span style="font-size:12px; color:var(--muted);">minutes</span>
+  </div>
+</div>
+
 <script>
+const assignmentId = '{{ a.id }}';
+const pointsPossible = {{ a.points_possible or 100 }};
+const currentAvg = {{ current_avg if current_avg is not none else 'null' }};
+
 async function markDone(id, btn) {
   await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
   btn.textContent = 'Done!';
@@ -237,6 +537,157 @@ function showDiffEdit(id, currentDiff, currentHours) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({difficulty: parseInt(d), hours: h ? parseFloat(h) : null})
   }).then(() => location.reload());
+}
+
+// Grade entry
+async function saveGrade(id) {
+  const earned = parseFloat(document.getElementById('pts-earned').value);
+  const possible = parseFloat(document.getElementById('pts-possible').value);
+  if (isNaN(earned) || isNaN(possible) || possible <= 0) return;
+  const resp = await fetch(`/api/grade/${id}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({points_earned: earned, points_possible: possible})
+  });
+  const data = await resp.json();
+  const pct = data.grade_pct;
+  const el = document.getElementById('grade-result');
+  el.textContent = pct.toFixed(1) + '%';
+  el.style.display = 'block';
+  el.style.color = pct >= 90 ? 'var(--green)' : pct >= 80 ? 'var(--yellow)' : 'var(--red)';
+  updateGpaImpact(pct);
+}
+
+async function deleteGrade(id) {
+  await fetch(`/api/grade/${id}`, {method: 'DELETE'});
+  location.reload();
+}
+
+// GPA Impact calculator
+function letterGrade(pct) {
+  if (pct >= 93) return 'A';
+  if (pct >= 90) return 'A-';
+  if (pct >= 87) return 'B+';
+  if (pct >= 83) return 'B';
+  if (pct >= 80) return 'B-';
+  if (pct >= 77) return 'C+';
+  if (pct >= 73) return 'C';
+  if (pct >= 70) return 'C-';
+  if (pct >= 60) return 'D';
+  return 'F';
+}
+
+function gradeColor(pct) {
+  if (pct >= 90) return 'var(--green)';
+  if (pct >= 80) return 'var(--yellow)';
+  return 'var(--red)';
+}
+
+function updateGpaImpact(scorePct) {
+  scorePct = parseFloat(scorePct);
+  document.getElementById('gpaScore').textContent = scorePct.toFixed(0) + '%';
+  // Simple: if we have currentAvg, show how this assignment shifts it
+  // Just show the score itself and its letter grade as the primary signal
+  const el = document.getElementById('gpaCourseAvg');
+  const letter = letterGrade(scorePct);
+  const color = gradeColor(scorePct);
+
+  if (currentAvg !== null) {
+    // Assume this assignment is ~10% of grade for simplification (no weight data in JS)
+    const weight = 0.10;
+    const projected = currentAvg * (1 - weight) + scorePct * weight;
+    el.textContent = projected.toFixed(1) + '% course avg';
+    el.style.color = color;
+    document.getElementById('gpaLetter').textContent = `${letter} on this assignment (${letterGrade(projected)} course)`;
+  } else {
+    el.textContent = letter + ' on this assignment';
+    el.style.color = color;
+    document.getElementById('gpaLetter').textContent = scorePct.toFixed(0) + '%';
+  }
+}
+
+// Initialize slider
+window.addEventListener('DOMContentLoaded', () => {
+  const slider = document.getElementById('gpaSlider');
+  if (slider) updateGpaImpact(slider.value);
+});
+
+// Notes
+let saveTimer;
+async function saveNote(id, note) {
+  clearTimeout(saveTimer);
+  await fetch(`/api/assignment/${id}/note`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note})
+  });
+  const el = document.getElementById('noteSaved');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 2000);
+}
+
+// Auto-save note on typing (debounced)
+document.getElementById('noteArea').addEventListener('input', function() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveNote(assignmentId, this.value), 1500);
+});
+
+// Checklist
+async function addItem(assignmentId) {
+  const input = document.getElementById('newItem');
+  const text = input.value.trim();
+  if (!text) return;
+  const resp = await fetch(`/api/assignment/${assignmentId}/checklist`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({item_text: text})
+  });
+  const data = await resp.json();
+  input.value = '';
+
+  const container = document.getElementById('checklist-container');
+  const div = document.createElement('div');
+  div.className = 'checklist-item';
+  div.id = 'ci-' + data.id;
+  div.innerHTML = `
+    <input type="checkbox" class="checklist-checkbox" onchange="toggleItem(${data.id}, this)" />
+    <span class="checklist-text" id="ct-${data.id}">${text}</span>
+    <button class="checklist-delete" onclick="deleteItem(${data.id})" title="Delete">×</button>
+  `;
+  container.appendChild(div);
+}
+
+async function toggleItem(id, cb) {
+  await fetch(`/api/checklist/${id}/toggle`, {method: 'POST'});
+  const textEl = document.getElementById('ct-' + id);
+  if (cb.checked) {
+    textEl.classList.add('done');
+  } else {
+    textEl.classList.remove('done');
+  }
+}
+
+async function deleteItem(id) {
+  await fetch(`/api/checklist/${id}`, {method: 'DELETE'});
+  const el = document.getElementById('ci-' + id);
+  if (el) el.remove();
+}
+
+// Time logging
+async function logTime(id) {
+  const input = document.getElementById('timeInput');
+  const minutes = parseInt(input.value);
+  if (isNaN(minutes) || minutes <= 0) return;
+  const resp = await fetch(`/api/assignment/${id}/time`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({minutes})
+  });
+  const data = await resp.json();
+  const total = data.total_minutes;
+  const hrs = (total / 60).toFixed(1);
+  document.getElementById('totalTime').textContent = `${total} min (${hrs}h)`;
+  input.value = '';
 }
 </script>
 {% endblock %}

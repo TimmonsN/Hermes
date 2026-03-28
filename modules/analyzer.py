@@ -181,7 +181,7 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> li
 
         rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
         rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
-        desc = (a.get("description") or "No description provided.")[:400]
+        desc = (a.get("description") or "No description provided.")[:600]
 
         lines.append(
             f"--- Assignment {idx + 1} ---\n"
@@ -189,34 +189,45 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> li
             f"Title: {a.get('title', 'Unknown')}\n"
             f"Points: {a.get('points_possible', 'unknown')}\n"
             f"Due: {due_at} ({days_until_due} days from now)\n"
+            f"Submission types: {a.get('submission_types', 'unknown')}\n"
             f"Description: {desc}\n"
             f"Syllabus rules: {rules_summary}"
         )
 
     batch_text = "\n\n".join(lines)
 
-    prompt = f"""Analyze each of the following {len(assignments)} assignments for a college student and return a JSON array.
+    prompt = f"""You are analyzing assignments for Niko, a college student at Ohio State University who tends to procrastinate and often starts things the day they are due. Your job is to give brutally honest, actionable analysis so he can get A grades.
+
+Analyze each of the following {len(assignments)} assignments and return a JSON array.
 
 {batch_text}
 
 Return a JSON array with exactly {len(assignments)} objects in the same order as the assignments above.
 Each object must have these fields:
 {{
-  "difficulty": 1-10,
-  "estimated_hours": float,
-  "assignment_type": "essay|coding|problem_set|reading|quiz|project|discussion|other",
+  "difficulty": 1-10 (be honest — a 3000-word essay is at least a 7),
+  "estimated_hours": float (realistic total including research, drafting, editing/debugging),
+  "time_breakdown": {{"research": float, "writing_or_coding": float, "review": float}},
+  "assignment_type": "essay|coding|problem_set|reading|quiz|project|discussion|lab|other",
   "priority": "low|medium|high|critical",
   "has_early_bonus": true/false,
   "early_bonus_details": "description or empty string",
   "can_resubmit": true/false,
   "resubmit_details": "description or empty string",
-  "recommended_days_before_due": integer,
-  "study_suggestions": ["tip1", "tip2"],
-  "watch_outs": ["important notes"],
-  "reasoning": "brief explanation"
+  "recommended_days_before_due": integer (minimum days ahead Niko should START, given his procrastination habit),
+  "study_suggestions": ["3-5 specific, actionable strategies for THIS assignment type", "e.g. for essays: outline first before writing", "for coding: test edge cases early"],
+  "watch_outs": ["2-4 specific traps or failure modes for this assignment", "e.g. don't forget to cite sources", "the rubric penalizes off-topic responses"],
+  "course_strategy_note": "one sentence on how this fits into the course grade",
+  "reasoning": "2-3 sentences on difficulty rating and time estimate"
 }}
 
-Consider: student procrastinates and currently does things day-of. Be realistic about difficulty.
+Critical rules:
+- study_suggestions must be SPECIFIC to the assignment type, not generic advice
+- watch_outs must be things that commonly cause students to lose points on THIS type of work
+- If the assignment involves Canvas submission or a specific format, call that out in watch_outs
+- Consider the syllabus grading weights when setting priority
+- Niko procrastinates — recommended_days_before_due should account for his tendency to start late
+
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
     try:
@@ -263,6 +274,134 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
             rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
             fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
         return fallback
+
+
+def analyze_course_strategy(course_name: str, syllabus_text: str, current_grade: float = None) -> dict:
+    """Return an overall course strategy based on syllabus and current grade."""
+    grade_note = f"Current grade: {current_grade:.1f}%" if current_grade is not None else "No grades entered yet."
+
+    prompt = f"""Analyze this course and give a strategic plan to maximize the student's grade.
+
+Course: {course_name}
+{grade_note}
+
+Syllabus content:
+{syllabus_text[:4000]}
+
+Return JSON:
+{{
+  "grade_breakdown": {{"category": "weight_pct", ...}},
+  "highest_impact_categories": ["which categories most affect the final grade"],
+  "strategy": "2-3 sentence overall strategy to maximize grade",
+  "assignments_to_prioritize": "which types of assignments to focus on and why",
+  "assignments_to_not_sweat": "which assignments are low-stakes",
+  "gpa_advice": "specific advice given current grade trajectory",
+  "key_rules": ["important rules from the syllabus that affect strategy"]
+}}
+
+Return ONLY valid JSON, no markdown."""
+
+    try:
+        return _parse_json(_ask(prompt))
+    except Exception as e:
+        logger.error(f"Course strategy analysis failed for {course_name}: {e}")
+        return {"strategy": "Analysis unavailable.", "grade_breakdown": {}, "key_rules": []}
+
+
+def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, stop_hour: int = 22, days: int = 14) -> list:
+    """Generate a day-by-day study schedule for the next N days.
+
+    Returns list of dicts: {date: str, assignment_id: str, hours_planned: float, note: str}
+    """
+    from datetime import date, timedelta
+
+    if not assignments and not exams:
+        return []
+
+    now = datetime.now()
+    available_hours_per_day = stop_hour - wake_hour  # hours available daily
+
+    # Build work items with urgency scores
+    work_items = []
+    for a in assignments:
+        if not a.get("due_at"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(a["due_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            days_left = max((due_dt - now).days, 0.5)
+            hours_needed = float(a.get("estimated_hours") or 2.0)
+            difficulty = int(a.get("difficulty") or 5)
+            urgency = hours_needed / days_left * (difficulty / 5.0)
+            work_items.append({
+                "assignment_id": a["id"],
+                "title": a.get("title", ""),
+                "course_name": a.get("course_name", ""),
+                "due_dt": due_dt,
+                "hours_needed": hours_needed,
+                "urgency": urgency,
+                "days_left": days_left,
+            })
+        except Exception:
+            continue
+
+    for e in exams:
+        if not e.get("start_at"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(e["start_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            days_left = max((due_dt - now).days, 0.5)
+            hours_needed = float(e.get("study_hours_estimated") or 6.0)
+            urgency = hours_needed / days_left * 2.0  # exams are higher urgency
+            work_items.append({
+                "assignment_id": e["id"],
+                "title": f"STUDY: {e.get('title', 'Exam')}",
+                "course_name": e.get("course_name", ""),
+                "due_dt": due_dt,
+                "hours_needed": hours_needed,
+                "urgency": urgency,
+                "days_left": days_left,
+            })
+        except Exception:
+            continue
+
+    if not work_items:
+        return []
+
+    # Sort by urgency descending
+    work_items.sort(key=lambda x: -x["urgency"])
+
+    # Build daily schedule
+    plan_entries = []
+    daily_budget = {}  # date_str -> hours_scheduled
+
+    for item in work_items:
+        hours_left = item["hours_needed"]
+        due_date = item["due_dt"].date()
+
+        # Spread work across days before due date
+        for day_offset in range(days):
+            plan_date = (now + timedelta(days=day_offset)).date()
+            if plan_date >= due_date:
+                break
+            if hours_left <= 0:
+                break
+
+            date_str = plan_date.isoformat()
+            used = daily_budget.get(date_str, 0)
+            max_hours = min(available_hours_per_day * 0.6, 6.0)  # cap at 6h/day per item
+            slot = min(hours_left, max_hours - used, 3.0)  # max 3h per item per day
+
+            if slot > 0.25:
+                plan_entries.append({
+                    "date": date_str,
+                    "assignment_id": item["assignment_id"],
+                    "hours_planned": round(slot, 1),
+                    "note": f"{item['title']} ({item['course_name']}) — due {item['due_dt'].strftime('%b %-d')}"
+                })
+                daily_budget[date_str] = used + slot
+                hours_left -= slot
+
+    return plan_entries
 
 
 def analyze_exam(exam: dict, syllabus_rules: dict, course_name: str) -> dict:
