@@ -279,14 +279,16 @@ def calendar_page():
     def _heatmap_intensity(target_date):
         score = 0.0
         for a in assignments:
-            if not a.get("due_dt") or not a.get("estimated_hours"):
+            if not a.get("due_dt"):
                 continue
             due_date = a["due_dt"].date()
             if due_date < target_date:
                 continue  # skip overdue — don't inflate past/present intensity
             days_until = max((due_date - target_date).days, 0.5)
             if days_until <= 7:
-                score += a["estimated_hours"] / days_until
+                # Fall back to 2h when Gemini hasn't analyzed yet
+                hours = a.get("estimated_hours") or 2.0
+                score += hours / days_until
         return round(score, 2)
 
     def _heatmap_level(intensity):

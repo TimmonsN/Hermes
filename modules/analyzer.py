@@ -10,6 +10,18 @@ logger = logging.getLogger("hermes.analyzer")
 
 _client = genai.Client(api_key=Config.GEMINI_API_KEY)
 
+def _default_analysis():
+    """Placeholder returned when API is unavailable. NOT stored to DB — triggers retry next sync."""
+    return {
+        "difficulty": None, "estimated_hours": None, "priority": "medium",
+        "has_early_bonus": False, "early_bonus_details": "",
+        "can_resubmit": False, "resubmit_details": "",
+        "recommended_days_before_due": Config.BUFFER_DAYS,
+        "start_by": None, "reasoning": None,
+        "_rate_limited": True,  # flag so hermes.py skips storing this
+    }
+
+
 HERMES_PERSONA = """You are Hermes, an AI academic assistant for a college student at Ohio State University.
 Your job is to analyze assignments, understand class rules, and help the student get the best grades possible.
 Be direct, practical, and fight for the student's success. The student tends to procrastinate (currently doing things day-of deadlines), so factor that in.
@@ -29,7 +41,7 @@ def _ask(prompt: str, retries: int = 3) -> str:
             )
             return response.text
         except ClientError as e:
-            if e.status_code == 429 and attempt < retries:
+            if e.code == 429 and attempt < retries:
                 wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
                 logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
                 time.sleep(wait)
@@ -280,8 +292,19 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
 
         return results
 
+    except ClientError as e:
+        if e.code == 429:
+            # Rate-limited — return defaults, do NOT fire individual calls (would just 429 again)
+            logger.warning(f"Batch rate-limited (429) — returning defaults for {len(assignments)} assignments. Will retry on next sync.")
+            return [_default_analysis() for _ in assignments]
+        logger.error(f"Batch API error ({e}), falling back to individual analysis")
+        fallback = []
+        for a in assignments:
+            rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
+            fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
+        return fallback
     except Exception as e:
-        logger.error(f"Batch analysis failed ({e}), falling back to individual analysis")
+        logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
         fallback = []
         for a in assignments:
             rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})

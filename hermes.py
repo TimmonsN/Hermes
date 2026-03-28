@@ -166,10 +166,16 @@ def sync_canvas():
                     rules_map[cid] = _get_syllabus_rules(cid)
             try:
                 analyses = analyzer.analyze_assignments_batch(chunk, rules_map)
+                stored = 0
                 for a, analysis in zip(chunk, analyses):
+                    if analysis.get("_rate_limited"):
+                        continue  # don't store placeholder — will retry on next sync
                     db.store_analysis(a["id"], analysis)
+                    stored += 1
                     logger.info(f"    OK: {a['title']} | diff={analysis.get('difficulty')} "
                                 f"hrs={analysis.get('estimated_hours')} priority={analysis.get('priority')}")
+                if stored < len(chunk):
+                    logger.warning(f"  Batch {batch_num}: {len(chunk)-stored} skipped (rate limited)")
             except Exception as e:
                 logger.warning(f"  Batch {batch_num} failed entirely: {e}")
             if batch_num < len(chunks):
