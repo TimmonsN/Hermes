@@ -173,7 +173,7 @@ def sync_canvas():
             except Exception as e:
                 logger.warning(f"  Batch {batch_num} failed entirely: {e}")
             if batch_num < len(chunks):
-                time.sleep(5)  # brief pause between batches to respect rate limits
+                time.sleep(15)  # pause between batches to respect rate limits
 
     # Analyze new exams (rate limited)
     for exam in db.get_upcoming_exams(days_ahead=60):
@@ -187,6 +187,7 @@ def sync_canvas():
                 logger.warning(f"  Exam skipped {exam['title']}: {e}")
             time.sleep(5)
 
+    db.set_pref("last_sync_time", datetime.now().isoformat())
     logger.info("Canvas sync complete.")
 
 
@@ -355,9 +356,22 @@ def main():
     is_reloader_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
     reloader_active = "WERKZEUG_RUN_MAIN" in os.environ
     if is_reloader_worker or not reloader_active:
-        # Initial Canvas sync in background thread so web UI starts immediately
-        sync_thread = threading.Thread(target=sync_canvas, daemon=True)
-        sync_thread.start()
+        # Only run startup sync if we haven't synced in the last 2 hours.
+        # This prevents the auto-reloader from burning through Gemini quota
+        # by re-syncing every time a file is saved during development.
+        last_sync = db.get_pref("last_sync_time")
+        sync_age_hours = None
+        if last_sync:
+            try:
+                sync_age_hours = (datetime.now() - datetime.fromisoformat(last_sync)).total_seconds() / 3600
+            except Exception:
+                pass
+
+        if sync_age_hours is None or sync_age_hours >= 2.0:
+            sync_thread = threading.Thread(target=sync_canvas, daemon=True)
+            sync_thread.start()
+        else:
+            logger.info(f"Skipping startup sync — last sync was {sync_age_hours:.1f}h ago (< 2h cooldown).")
 
         # Scheduler
         scheduler = BackgroundScheduler(timezone="America/New_York")

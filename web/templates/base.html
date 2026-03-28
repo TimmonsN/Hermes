@@ -241,10 +241,9 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           Study Plan
         </a>
-        <a href="/announcements" class="{% if request.path == '/announcements' %}active{% endif %}">
+        <a href="/alerts" class="{% if request.path == '/alerts' %}active{% endif %}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           Alerts
-          {% if unread_announcements > 0 %}<span class="nav-badge">{{ unread_announcements }}</span>{% endif %}
         </a>
         <a href="/chat" class="{% if request.path == '/chat' %}active{% endif %}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>

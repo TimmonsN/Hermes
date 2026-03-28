@@ -1,7 +1,9 @@
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from google import genai
+from google.genai.errors import ClientError
 from config import Config
 
 logger = logging.getLogger("hermes.analyzer")
@@ -14,14 +16,25 @@ Be direct, practical, and fight for the student's success. The student tends to 
 Always respond with valid JSON when asked for structured analysis."""
 
 
-def _ask(prompt: str) -> str:
-    """Send a prompt to Gemini and return the text response."""
+def _ask(prompt: str, retries: int = 3) -> str:
+    """Send a prompt to Gemini and return the text response.
+    Retries up to `retries` times on 429 rate-limit errors with exponential backoff.
+    """
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
-    response = _client.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=full_prompt
-    )
-    return response.text
+    for attempt in range(retries + 1):
+        try:
+            response = _client.models.generate_content(
+                model=Config.GEMINI_MODEL,
+                contents=full_prompt
+            )
+            return response.text
+        except ClientError as e:
+            if e.status_code == 429 and attempt < retries:
+                wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _parse_json(text: str) -> dict:

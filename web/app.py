@@ -271,39 +271,54 @@ def calendar_page():
     exams_raw = db.get_upcoming_exams(days_ahead=28)
     exams = [_enrich_exam(e) for e in exams_raw]
 
-    # Build heatmap intensity: sum of (hours * 1/days_until_due) for assignments due within 7 days of that day
+    today = now.date()
+
+    # Heatmap: pressure score for a day = sum of (hours / max(days_until_due, 0.5))
+    # for assignments due ON OR AFTER target_date, within 7 days ahead.
+    # Only count future/today assignments — not overdue ones — to avoid phantom pressure.
     def _heatmap_intensity(target_date):
         score = 0.0
         for a in assignments:
-            if a.get("due_dt") and a.get("estimated_hours"):
-                days_diff = abs((a["due_dt"].date() - target_date).days)
-                if days_diff <= 7:
-                    days_until = max((a["due_dt"].date() - target_date).days, 0.5)
-                    score += (a["estimated_hours"] * (1.0 / days_until))
+            if not a.get("due_dt") or not a.get("estimated_hours"):
+                continue
+            due_date = a["due_dt"].date()
+            if due_date < target_date:
+                continue  # skip overdue — don't inflate past/present intensity
+            days_until = max((due_date - target_date).days, 0.5)
+            if days_until <= 7:
+                score += a["estimated_hours"] / days_until
         return round(score, 2)
 
-    def _heatmap_class(intensity):
+    def _heatmap_level(intensity):
+        """Returns (css_class, height_px) — height scales proportionally to intensity."""
         if intensity <= 0:
-            return "heat-none"
-        elif intensity < 1.5:
-            return "heat-light"
-        elif intensity < 4.0:
-            return "heat-moderate"
-        elif intensity < 8.0:
-            return "heat-heavy"
+            return "heat-none", 4
+        elif intensity < 1.0:
+            return "heat-light", 6
+        elif intensity < 3.0:
+            return "heat-moderate", 10
+        elif intensity < 6.0:
+            return "heat-heavy", 16
         else:
-            return "heat-overwhelming"
+            return "heat-overwhelming", 22
+
+    # Start the calendar on the most recent Sunday (US standard week)
+    # isoweekday(): Mon=1 ... Sun=7 → days since Sunday = isoweekday() % 7
+    days_since_sunday = today.isoweekday() % 7
+    week_start = today - timedelta(days=days_since_sunday)
 
     weeks = []
     for week_num in range(4):
         week = []
         week_total_hours = 0.0
-        for day_offset in range(7):
-            offset = week_num * 7 + day_offset
-            day_date = (now + timedelta(days=offset)).date()
-            if offset == 0:
+        for day_offset in range(7):  # Sun=0 … Sat=6
+            day_date = week_start + timedelta(weeks=week_num, days=day_offset)
+            is_today = (day_date == today)
+            is_past = (day_date < today)
+
+            if is_today:
                 day_name = "Today"
-            elif offset == 1:
+            elif day_date == today + timedelta(days=1):
                 day_name = "Tomorrow"
             else:
                 day_name = day_date.strftime("%A")
@@ -321,15 +336,18 @@ def calendar_page():
             total_hours = sum(a.get("estimated_hours") or 0 for a in day_assignments)
             week_total_hours += total_hours
             intensity = _heatmap_intensity(day_date)
+            heat_class, heat_height = _heatmap_level(intensity)
             week.append({
                 "day_name": day_name,
                 "date_str": day_date.strftime("%b %-d"),
                 "assignments": day_assignments,
                 "exams": day_exams,
                 "total_hours": round(total_hours, 1),
-                "is_today": offset == 0,
+                "is_today": is_today,
+                "is_past": is_past,
                 "heat_intensity": intensity,
-                "heat_class": _heatmap_class(intensity),
+                "heat_class": heat_class,
+                "heat_height": heat_height,
             })
         weeks.append({"days": week, "week_total_hours": round(week_total_hours, 1)})
 
@@ -465,6 +483,13 @@ def courses_page():
                         course["grading_weights"] = " | ".join(parts[:4])
                 except Exception:
                     pass
+
+        # Attach recent announcements for this course
+        anns = db.get_announcements_for_course(str(c["id"]), limit=5)
+        course["announcements"] = _enrich_announcements(list(anns))
+        # Mark all as read when courses page is viewed
+        for ann in course["announcements"]:
+            db.mark_announcement_read(ann["canvas_id"])
 
         enriched.append(course)
 
@@ -746,29 +771,121 @@ def generate_study_plan():
     return jsonify({"status": "ok", "entries": len(entries)})
 
 
-# ─── Announcements ────────────────────────────────────────────────────────────
+# ─── Alerts (Hermes-generated) ────────────────────────────────────────────────
+
+@app.route("/alerts")
+def alerts_page():
+    """Hermes-generated intelligence: proactive warnings, urgent items, what Hermes would text."""
+    now = datetime.now()
+    assignments_raw = db.get_upcoming_assignments(days_ahead=21)
+    assignments = [_enrich_assignment(a) for a in assignments_raw]
+    exams_raw = db.get_upcoming_exams(days_ahead=21)
+    exams = [_enrich_exam(e) for e in exams_raw]
+
+    alerts = []
+
+    # Overdue items
+    for a in assignments:
+        if a.get("due_dt") and (a["due_dt"] - now).total_seconds() < 0 and a.get("status") != "submitted":
+            alerts.append({
+                "level": "danger", "icon": "overdue",
+                "title": "Overdue",
+                "message": f"{a['title']} ({a.get('course_name','')}) was due {a['due_fmt']}.",
+                "assignment_id": a["id"],
+            })
+
+    # Heavy workload next 48h
+    next_48h = [a for a in assignments if a.get("due_dt") and 0 <= (a["due_dt"] - now).total_seconds() / 3600 <= 48]
+    total_48h = sum(a.get("estimated_hours") or 0 for a in next_48h)
+    if total_48h >= 4:
+        hardest = max(next_48h, key=lambda x: x.get("difficulty") or 0, default=None)
+        alerts.append({
+            "level": "danger", "icon": "fire",
+            "title": f"~{round(total_48h,1)}h due in 48h",
+            "message": f"You have {len(next_48h)} assignment(s) totaling ~{round(total_48h,1)}h due in the next 48 hours. Start with {hardest['title']} first." if hardest else f"{len(next_48h)} assignments due in 48h.",
+            "assignment_id": hardest["id"] if hardest else None,
+        })
+
+    # Unstarted assignments due within 30h
+    for a in assignments:
+        if a.get("due_dt") and a.get("status", "pending") == "pending":
+            hours = (a["due_dt"] - now).total_seconds() / 3600
+            if 0 < hours <= 30:
+                alerts.append({
+                    "level": "danger", "icon": "clock",
+                    "title": f"Due in ~{int(hours)}h",
+                    "message": f"'{a['title']}' ({a.get('course_name','')}) hasn't been started and is due soon.",
+                    "assignment_id": a["id"],
+                })
+
+    # Exams within 5 days
+    for e in exams:
+        if e.get("start_at"):
+            try:
+                exam_dt = _from_canvas_time(e["start_at"])
+                days = (exam_dt - now).days
+                if 0 < days <= 5:
+                    alerts.append({
+                        "level": "warning", "icon": "exam",
+                        "title": f"Exam in {days} day{'s' if days != 1 else ''}",
+                        "message": f"{e['title']} ({e.get('course_name','')}) — you should already be studying.",
+                        "assignment_id": None,
+                    })
+            except Exception:
+                pass
+
+    # 3+ assignments same day
+    from collections import defaultdict
+    day_map = defaultdict(list)
+    for a in assignments:
+        if a.get("due_dt"):
+            day_map[a["due_dt"].date()].append(a)
+    for day_date, items in sorted(day_map.items()):
+        if len(items) >= 3:
+            days_away = (datetime(day_date.year, day_date.month, day_date.day) - now).days
+            if 1 <= days_away <= 10:
+                alerts.append({
+                    "level": "warning", "icon": "stack",
+                    "title": f"{len(items)} due {day_date.strftime('%a %b %-d')}",
+                    "message": f"{', '.join(a['title'] for a in items[:3])}{'...' if len(items) > 3 else ''} all due the same day.",
+                    "assignment_id": None,
+                })
+
+    # Early bonus windows closing
+    for a in assignments:
+        if a.get("has_early_bonus") and a.get("due_dt"):
+            hours = (a["due_dt"] - now).total_seconds() / 3600
+            if 24 <= hours <= 36:
+                alerts.append({
+                    "level": "info", "icon": "bonus",
+                    "title": "Early bonus closing",
+                    "message": f"Submit '{a['title']}' in the next ~{int(hours - 24)}h to earn bonus points.",
+                    "assignment_id": a["id"],
+                })
+
+    if not alerts:
+        alerts = []  # empty state handled in template
+
+    return render_template("alerts.html", alerts=alerts)
+
+
+# ─── Announcements (Canvas professor posts — lives in Courses tab) ─────────────
 
 HIGHLIGHT_KEYWORDS = [
     "due date", "extended", "extra credit", "exam", "cancelled", "canceled",
     "moved", "postponed", "bonus", "important", "reminder", "grade"
 ]
 
-@app.route("/announcements")
-def announcements_page():
-    announcements = db.get_announcements(limit=100)
-    # Mark keywords for highlight
+def _enrich_announcements(announcements):
     for ann in announcements:
         text = ((ann.get("title") or "") + " " + (ann.get("message") or "")).lower()
         ann["highlighted"] = any(kw in text for kw in HIGHLIGHT_KEYWORDS)
-        # Format posted_at
         try:
             dt = datetime.fromisoformat(ann["posted_at"].replace("Z", "+00:00")).replace(tzinfo=None)
-            ann["posted_fmt"] = dt.strftime("%b %-d, %Y")
+            ann["posted_fmt"] = dt.strftime("%b %-d")
         except Exception:
-            ann["posted_fmt"] = ann.get("posted_at", "")[:10]
-    # Mark all as read
-    db.mark_all_announcements_read()
-    return render_template("announcements.html", announcements=announcements)
+            ann["posted_fmt"] = (ann.get("posted_at") or "")[:10]
+    return announcements
 
 
 @app.route("/api/announcement/<canvas_id>/read", methods=["POST"])

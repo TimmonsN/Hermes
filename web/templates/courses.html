@@ -5,6 +5,20 @@
 <h1>Courses</h1>
 <p class="subtitle">{{ courses|length }} active this semester</p>
 
+<style>
+  .ann-item {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .ann-item:last-child { border-bottom: none; }
+  .ann-title { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  .ann-title.highlighted { color: var(--yellow); }
+  .ann-meta { color: var(--muted); font-size: 11px; }
+  .ann-msg { color: var(--muted); margin-top: 3px; font-size: 11px; line-height: 1.4;
+             max-height: 40px; overflow: hidden; text-overflow: ellipsis; }
+</style>
+
 {% for c in courses %}
 <div class="card">
   <div class="card-header">
@@ -12,24 +26,46 @@
       <div class="card-title">{{ c.name }}</div>
       <div class="card-sub">{{ c.code }}</div>
     </div>
-    <div style="display:flex; gap:8px;">
+    <div style="display:flex; gap:8px; align-items:center;">
       {% if c.assignment_count %}<span class="tag">{{ c.assignment_count }} assignments</span>{% endif %}
       {% if c.has_syllabus %}<span class="tag tag-bonus">syllabus ingested</span>{% endif %}
     </div>
   </div>
+
   {% if c.grading_weights %}
-  <div style="color:var(--muted); font-size:12px; margin-top:8px;">
+  <div style="color:var(--muted); font-size:12px; margin-top:4px;">
     Grading: {{ c.grading_weights }}
   </div>
   {% endif %}
+
   {% if c.early_bonus %}
   <div class="alert alert-warning" style="margin-top:10px; font-size:12px;">
     Early submission bonus: {{ c.early_bonus }}
   </div>
   {% endif %}
+
   {% if c.resubmit %}
   <div style="color:var(--accent); font-size:12px; margin-top:6px;">
     Resubmit policy: {{ c.resubmit }}
+  </div>
+  {% endif %}
+
+  {% if c.announcements %}
+  <div style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
+    <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">
+      Professor Posts
+    </div>
+    {% for ann in c.announcements %}
+    <div class="ann-item">
+      <div class="ann-title {% if ann.highlighted %}highlighted{% endif %}">
+        {% if ann.highlighted %}⚡ {% endif %}{{ ann.title }}
+      </div>
+      <div class="ann-meta">{{ ann.posted_fmt }}</div>
+      {% if ann.message %}
+      <div class="ann-msg">{{ ann.message | striptags | truncate(120) }}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
 </div>

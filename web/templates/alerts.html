@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %} — Alerts{% endblock %}
+
+{% block content %}
+<h1>Alerts</h1>
+<p class="subtitle">Hermes-generated warnings — things Niko needs to act on now</p>
+
+<style>
+  .alert-card {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    padding: 16px 20px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    border: 1px solid;
+  }
+  .alert-card.danger  { background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.3); }
+  .alert-card.warning { background: rgba(251,191,36,0.08);  border-color: rgba(251,191,36,0.3); }
+  .alert-card.info    { background: rgba(124,108,255,0.08); border-color: rgba(124,108,255,0.3); }
+  .alert-icon { font-size: 20px; flex-shrink: 0; padding-top: 1px; }
+  .alert-body { flex: 1; }
+  .alert-title {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+  .alert-card.danger  .alert-title { color: var(--red); }
+  .alert-card.warning .alert-title { color: var(--yellow); }
+  .alert-card.info    .alert-title { color: var(--accent); }
+  .alert-msg { font-size: 13px; color: var(--text); line-height: 1.5; }
+  .alert-action { margin-top: 8px; }
+  .empty-state {
+    text-align: center; padding: 64px 32px; color: var(--muted);
+  }
+  .empty-state .big { font-size: 36px; margin-bottom: 12px; }
+  .empty-state .sub { font-size: 13px; }
+</style>
+
+{% if alerts %}
+  {% for a in alerts %}
+  <div class="alert-card {{ a.level }}">
+    <div class="alert-icon">
+      {% if a.icon == 'fire' %}🔥
+      {% elif a.icon == 'overdue' %}🚨
+      {% elif a.icon == 'clock' %}⏰
+      {% elif a.icon == 'exam' %}📝
+      {% elif a.icon == 'stack' %}📚
+      {% elif a.icon == 'bonus' %}⭐
+      {% else %}⚠️{% endif %}
+    </div>
+    <div class="alert-body">
+      <div class="alert-title">{{ a.title }}</div>
+      <div class="alert-msg">{{ a.message }}</div>
+      {% if a.assignment_id %}
+      <div class="alert-action">
+        <a href="/assignments/{{ a.assignment_id }}" class="btn btn-ghost" style="font-size:12px; padding:4px 12px;">View Assignment</a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+<div class="empty-state">
+  <div class="big">✅</div>
+  <div style="font-size:18px; font-weight:600; margin-bottom:8px;">You're all clear</div>
+  <div class="sub">No pressing alerts right now. Hermes will flag anything urgent here as it comes up.</div>
+</div>
+{% endif %}
+
+{% endblock %}

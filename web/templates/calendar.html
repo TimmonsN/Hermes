@@ -3,34 +3,29 @@
 
 {% block content %}
 <h1>Calendar</h1>
-<p class="subtitle">Next 4 weeks</p>
+<p class="subtitle">4-week view &nbsp;·&nbsp; starts Sunday</p>
 
 <style>
-  .cal-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-  .cal-header {
+  .cal-day-headers {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
     gap: 8px;
     margin-bottom: 4px;
   }
-  .cal-header-cell {
-    font-size: 11px;
+  .cal-day-header {
+    font-size: 10px;
     font-weight: 700;
     color: var(--muted);
     text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 0 8px;
+    letter-spacing: 0.5px;
+    text-align: center;
+    padding: 0 4px;
   }
   .cal-week-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 20px 0 6px;
+    margin: 20px 0 4px;
   }
   .cal-week-label {
     font-size: 11px;
@@ -44,36 +39,45 @@
     color: var(--accent);
     font-weight: 600;
   }
-  /* Heatmap row */
+  /* Heatmap: bars with variable height aligned to bottom */
   .cal-heat-grid {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
     gap: 8px;
     margin-bottom: 4px;
+    align-items: flex-end;
+    height: 28px;
   }
   .cal-heat-cell {
-    height: 8px;
-    border-radius: 4px;
-    transition: opacity 0.2s;
+    border-radius: 3px 3px 0 0;
+    transition: height 0.3s ease;
   }
-  .heat-none    { background: var(--surface2); }
-  .heat-light   { background: rgba(74,222,128,0.5); }
-  .heat-moderate{ background: rgba(251,191,36,0.6); }
-  .heat-heavy   { background: rgba(251,146,60,0.7); }
-  .heat-overwhelming { background: rgba(248,113,113,0.8); }
+  .heat-none         { background: var(--surface2); height: 4px; }
+  .heat-light        { background: rgba(74,222,128,0.6); }
+  .heat-moderate     { background: rgba(251,191,36,0.7); }
+  .heat-heavy        { background: rgba(251,146,60,0.8); }
+  .heat-overwhelming { background: rgba(248,113,113,0.9); }
+
+  .cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+    margin-bottom: 8px;
+  }
   .cal-cell {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px 8px;
     min-height: 100px;
-    transition: border-color 0.15s, transform 0.15s;
+    transition: border-color 0.15s;
   }
   .cal-cell:hover { border-color: var(--accent-dim); }
   .cal-cell.today {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent-dim);
   }
+  .cal-cell.past { opacity: 0.45; }
   .cal-cell-day {
     font-size: 11px;
     font-weight: 700;
@@ -81,59 +85,34 @@
     letter-spacing: 0.4px;
     margin-bottom: 1px;
   }
-  .cal-cell-date {
-    font-size: 11px;
-    color: var(--muted);
-    margin-bottom: 6px;
-  }
-  .cal-hours {
-    font-size: 10px;
-    color: var(--accent);
-    margin-bottom: 4px;
-  }
+  .cal-cell-date { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .cal-hours { font-size: 10px; color: var(--accent); margin-bottom: 4px; }
   .cal-item {
-    font-size: 10px;
-    padding: 2px 0;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 10px; padding: 2px 0;
+    display: flex; align-items: center; gap: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .cal-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .cal-exam {
-    font-size: 10px;
-    color: var(--yellow);
-    padding: 2px 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .cal-empty {
-    font-size: 10px;
-    color: var(--border);
-    margin-top: 4px;
-  }
-  .heat-legend {
-    display: flex; gap: 8px; align-items: center; margin-bottom: 20px; font-size: 11px; color: var(--muted);
-  }
-  .heat-legend-dot { width: 12px; height: 8px; border-radius: 3px; display: inline-block; }
+  .cal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .cal-exam { font-size: 10px; color: var(--yellow); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cal-empty { font-size: 10px; color: var(--border); margin-top: 4px; }
+  .heat-legend { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; font-size: 11px; color: var(--muted); }
+  .heat-legend-swatch { width: 12px; height: 8px; border-radius: 2px; display: inline-block; }
 </style>
 
-<!-- Heatmap legend -->
 <div class="heat-legend">
-  Intensity:
-  <span class="heat-legend-dot heat-none"></span> None
-  <span class="heat-legend-dot heat-light"></span> Light
-  <span class="heat-legend-dot heat-moderate"></span> Moderate
-  <span class="heat-legend-dot heat-heavy"></span> Heavy
-  <span class="heat-legend-dot heat-overwhelming"></span> Overwhelming
+  Workload pressure:
+  <span class="heat-legend-swatch heat-none"></span> None
+  <span class="heat-legend-swatch heat-light"></span> Light
+  <span class="heat-legend-swatch heat-moderate"></span> Moderate
+  <span class="heat-legend-swatch heat-heavy"></span> Heavy
+  <span class="heat-legend-swatch heat-overwhelming"></span> Overwhelming
+</div>
+
+<!-- Day-of-week headers (fixed, shown once) -->
+<div class="cal-day-headers">
+  {% for day_name in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] %}
+  <div class="cal-day-header">{{ day_name }}</div>
+  {% endfor %}
 </div>
 
 {% set week_labels = ["This Week", "Next Week", "Week 3", "Week 4"] %}
@@ -141,19 +120,23 @@
 {% for week in weeks %}
 <div class="cal-week-row">
   <div class="cal-week-label">{{ week_labels[loop.index0] }}</div>
-  <div class="cal-week-total">~{{ week.week_total_hours }}h total</div>
+  {% if week.week_total_hours > 0 %}
+  <div class="cal-week-total">~{{ week.week_total_hours }}h of work</div>
+  {% endif %}
 </div>
 
-<!-- Heatmap row -->
+<!-- Heatmap bars (variable height, aligned to bottom) -->
 <div class="cal-heat-grid">
   {% for day in week.days %}
-  <div class="cal-heat-cell {{ day.heat_class }}" title="{{ day.date_str }}: intensity {{ day.heat_intensity }}"></div>
+  <div class="cal-heat-cell {{ day.heat_class }}"
+       style="height: {{ day.heat_height }}px;"
+       title="{{ day.date_str }}: {% if day.heat_intensity > 0 %}pressure score {{ day.heat_intensity }}{% else %}no upcoming work{% endif %}"></div>
   {% endfor %}
 </div>
 
 <div class="cal-grid">
   {% for day in week.days %}
-  <div class="cal-cell {% if day.is_today %}today{% endif %}">
+  <div class="cal-cell {% if day.is_today %}today{% elif day.is_past %}past{% endif %}">
     <div class="cal-cell-day" style="color:{% if day.is_today %}var(--accent){% else %}var(--muted){% endif %};">
       {{ day.day_name[:3] if not day.is_today else "Today" }}
     </div>
@@ -163,20 +146,14 @@
       {% if day.total_hours %}
       <div class="cal-hours">~{{ day.total_hours }}h</div>
       {% endif %}
-
       {% for a in day.assignments %}
       <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; display:block;">
         <div class="cal-item" title="{{ a.title }}">
-          <div class="cal-dot" style="background:
-            {% if a.priority == 'critical' %}var(--red)
-            {% elif a.priority == 'high' %}var(--orange)
-            {% elif a.priority == 'medium' %}var(--yellow)
-            {% else %}var(--green){% endif %};"></div>
+          <div class="cal-dot" style="background:{% if a.priority == 'critical' %}var(--red){% elif a.priority == 'high' %}var(--orange){% elif a.priority == 'medium' %}var(--yellow){% else %}var(--green){% endif %};"></div>
           <span style="overflow:hidden;text-overflow:ellipsis;">{{ a.title[:22] }}{% if a.title|length > 22 %}…{% endif %}</span>
         </div>
       </a>
       {% endfor %}
-
       {% for e in day.exams %}
       <div class="cal-exam" title="{{ e.title }}">★ {{ e.title[:20] }}{% if e.title|length > 20 %}…{% endif %}</div>
       {% endfor %}

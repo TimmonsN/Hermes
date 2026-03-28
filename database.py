@@ -564,6 +564,14 @@ def get_announcements(limit=50):
     conn.close()
     return [dict(r) for r in rows]
 
+def get_announcements_for_course(course_id, limit=5):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM announcements WHERE course_id=? ORDER BY posted_at DESC LIMIT ?
+    """, (str(course_id), limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 def get_unread_announcement_count():
     conn = get_conn()
     row = conn.execute("SELECT COUNT(*) as cnt FROM announcements WHERE is_read=0").fetchone()
