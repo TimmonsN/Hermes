@@ -664,13 +664,20 @@ def assignment_detail(assignment_id):
     # Grade entry (read-only display)
     grade_obj = db.get_grade_for_assignment(assignment_id)
 
-    # Flag if Canvas gave us a useless description so the UI can show a note
-    description_inferred = _is_boilerplate_description(a.get("description", ""))
-
     # Ingested course materials — show only ones relevant to this assignment
-    course_materials = []
     syllabi = db.get_syllabus(str(a.get("course_id", "")))
     course_materials = _relevant_course_materials(a.get("title", ""), syllabi)
+
+    # Classify the description situation so the template can be honest
+    # description_status: "real" | "from_materials" | "blind_guess"
+    raw_desc = a.get("description", "")
+    if not _is_boilerplate_description(raw_desc):
+        description_status = "real"
+    elif course_materials:
+        description_status = "from_materials"
+    else:
+        description_status = "blind_guess"
+    description_inferred = description_status != "real"  # keep backward compat for template
 
     # task_sections, course_weight_context, and study_strategy from analysis
     task_sections = []
@@ -749,6 +756,7 @@ def assignment_detail(assignment_id):
         schedule_scenarios=schedule_scenarios,
         grade_impact_pct=grade_impact_pct,
         study_strategy=study_strategy,
+        description_status=description_status,
     )
 
 

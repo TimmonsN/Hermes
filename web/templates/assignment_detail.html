@@ -339,9 +339,15 @@
 </div>
 {% endif %}
 
-{% if course_strategy_note %}
+{% if grade_impact_pct is not none or course_strategy_note %}
 <div class="bonus-block" style="background:rgba(124,108,255,0.05); border-color:rgba(124,108,255,0.2);">
-  <strong>Course Impact</strong> — {{ course_strategy_note }}
+  <strong>Course Impact</strong> —
+  {% if grade_impact_pct is not none %}
+    This assignment is worth <strong>{{ grade_impact_pct }}%</strong> of your final grade in {{ a.course_name }}.
+    {% if course_strategy_note %}<span style="color:var(--muted);">{{ course_strategy_note }}</span>{% endif %}
+  {% else %}
+    {{ course_strategy_note }}
+  {% endif %}
 </div>
 {% endif %}
 
@@ -356,14 +362,7 @@
 {% endif %}
 
 <!-- Description -->
-{% if description_inferred %}
-<div class="info-block" style="border-color: rgba(124,108,255,0.25);">
-  <h3>Description</h3>
-  <div style="font-size:12px; color:var(--accent); margin-bottom:8px;">
-    ℹ Canvas provided no real description — Hermes inferred this analysis from the course name and assignment title.
-  </div>
-</div>
-{% elif a.description %}
+{% if description_status == "real" and a.description %}
 <div class="info-block">
   <h3>Description</h3>
   <div class="description-content">
@@ -372,6 +371,29 @@
     {% else %}
       <p>{{ a.description }}</p>
     {% endif %}
+  </div>
+</div>
+{% elif description_status == "from_materials" %}
+<div class="info-block" style="border-color: rgba(124,108,255,0.2);">
+  <h3>Description</h3>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+    Canvas did not provide a description for this assignment. Hermes analyzed it using the course files below.
+  </div>
+  {% if course_materials %}
+  <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+    <span style="font-weight:600; color:var(--text);">Sources used:</span>
+    {% for m in course_materials %}
+    <span style="display:inline-block; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:2px 8px; margin:2px; font-size:11px;">{{ m.filename }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% elif description_status == "blind_guess" %}
+<div class="info-block" style="border-color: rgba(248,113,113,0.2);">
+  <h3>Description</h3>
+  <div style="font-size:12px; color:var(--red); margin-bottom:4px; font-weight:600;">No description or course files available</div>
+  <div style="font-size:12px; color:var(--muted);">
+    Canvas provided no description and no matching course files were found. Hermes analyzed this from the course name and assignment title only — trigger a sync to import course materials.
   </div>
 </div>
 {% endif %}

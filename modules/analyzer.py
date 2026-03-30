@@ -314,10 +314,11 @@ Return ONLY valid JSON, no markdown."""
         }
 
 
-def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None, course_notes_map: dict = None) -> list:
+def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None, course_notes_map: dict = None, course_groups_map: dict = None) -> list:
     """Analyze up to 15 assignments in a single API call (Gemini primary, Groq fallback).
 
     Returns list of analysis dicts in the same order as the input assignments.
+    course_groups_map: {course_id: [{canvas_group_id, name, weight}, ...]}
     """
     if not assignments:
         return []
@@ -346,15 +347,29 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, cours
             materials = materials_dict  # backward compat if string passed
         rubric = a.get("rubric_text", "")
         course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
+
+        # Resolve actual assignment group name and weight from Canvas data
+        groups = (course_groups_map or {}).get(str(a.get("course_id", "")), [])
+        group_info = next(
+            (g for g in groups if g.get("canvas_group_id") == a.get("canvas_group_id")),
+            None
+        )
+        if group_info and group_info.get("weight", 0) > 0:
+            grade_weight_line = (
+                f"Grade category: {group_info['name']} — worth {group_info['weight']:.0f}% of final grade"
+            )
+        else:
+            grade_weight_line = "Grade category: Unknown (no group weight data)"
+
         if _is_boilerplate_description(raw_desc):
             if materials:
-                desc = f"[Assignment PDF content — use this to understand the assignment:]\n{materials[:2500]}"
+                desc = f"[Canvas description is a submission link only. Assignment content inferred from course materials below:]\n{materials[:2500]}"
             else:
-                desc = f"[No real description — Canvas submission link only. Infer from course name '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your academic knowledge.]"
+                desc = f"[No Canvas description and no matching course files found. Infer from course '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your academic knowledge.]"
         else:
-            desc = raw_desc[:600]
+            desc = raw_desc[:800]
             if materials:
-                desc += f"\n\nCourse materials context:\n{materials[:1500]}"
+                desc += f"\n\nRelevant course materials:\n{materials[:1500]}"
 
         lines.append(
             f"--- Assignment {idx + 1} ---\n"
@@ -363,6 +378,7 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, cours
             f"Points: {a.get('points_possible', 'unknown')}\n"
             f"Due: {due_at} ({days_until_due} days from now)\n"
             f"Submission types: {a.get('submission_types', 'unknown')}\n"
+            f"{grade_weight_line}\n"
             f"Description: {desc}\n"
             f"Rubric (grading criteria): {rubric if rubric else 'Not available'}\n"
             f"Course strategy notes: {course_notes[:400] if course_notes else 'None yet'}\n"

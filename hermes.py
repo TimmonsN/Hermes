@@ -193,10 +193,11 @@ def sync_canvas():
         logger.info(f"Analyzing {len(all_to_analyze)} assignments in {len(chunks)} batch(es) of up to {BATCH_SIZE}...")
         for batch_num, chunk in enumerate(chunks, start=1):
             logger.info(f"  Batch {batch_num}/{len(chunks)}: {len(chunk)} assignments")
-            # Build syllabus_rules_map and course_materials_map for this chunk
+            # Build syllabus_rules_map, course_materials_map, course_groups_map for this chunk
             rules_map = {}
             materials_map = {}
             course_notes_map = {}
+            groups_map = {}
             for a in chunk:
                 cid = str(a["course_id"])
                 if cid not in rules_map:
@@ -205,8 +206,10 @@ def sync_canvas():
                     materials_map[cid] = _get_course_materials_dict(cid)
                 if cid not in course_notes_map:
                     course_notes_map[cid] = db.get_course_notes(cid)
+                if cid not in groups_map:
+                    groups_map[cid] = db.get_assignment_groups(cid)
             try:
-                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map, course_notes_map)
+                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map, course_notes_map, groups_map)
                 stored = 0
                 all_rate_limited = True
                 for a, analysis in zip(chunk, analyses):
