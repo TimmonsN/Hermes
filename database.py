@@ -10,6 +10,13 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+def _connect():
+    """Context-manager-compatible connection (use with 'with' statement)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -174,6 +181,14 @@ def init_db():
             calls INTEGER DEFAULT 0,
             UNIQUE(provider, date)
         );
+
+        CREATE TABLE IF NOT EXISTS assignment_groups (
+            pk TEXT PRIMARY KEY,
+            course_id TEXT,
+            canvas_group_id INTEGER,
+            name TEXT,
+            weight REAL
+        );
     """)
 
     conn.commit()
@@ -184,6 +199,9 @@ def init_db():
         "ALTER TABLE courses ADD COLUMN canvas_grade_pct REAL",
         "ALTER TABLE courses ADD COLUMN course_notes TEXT",
         "ALTER TABLE assignments ADD COLUMN rubric_text TEXT",
+        "ALTER TABLE course_grade_goals ADD COLUMN ai_suggested_target REAL",
+        "ALTER TABLE course_grade_goals ADD COLUMN ai_target_reasoning TEXT",
+        "ALTER TABLE assignments ADD COLUMN canvas_group_id INTEGER",
     ]:
         try:
             conn.execute(migration)
@@ -220,6 +238,12 @@ def get_courses(include_ignored=False):
 def set_course_ignored(course_id, ignored: bool):
     conn = get_conn()
     conn.execute("UPDATE courses SET is_ignored=? WHERE id=?", (1 if ignored else 0, str(course_id)))
+    conn.commit()
+    conn.close()
+
+def set_course_piazza_nid(course_id, nid):
+    conn = get_conn()
+    conn.execute("UPDATE courses SET piazza_nid=? WHERE id=?", (nid, str(course_id)))
     conn.commit()
     conn.close()
 
@@ -423,6 +447,12 @@ def upsert_exam(data: dict):
     conn.close()
     return exam_id
 
+def get_exam_by_id(exam_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM exam_events WHERE id=?", (str(exam_id),)).fetchone()
+    conn.close()
+    return row
+
 def get_upcoming_exams(days_ahead=30):
     conn = get_conn()
     rows = conn.execute("""
@@ -577,6 +607,29 @@ def get_grade_goal(course_id):
     row = conn.execute("SELECT target_grade_pct FROM course_grade_goals WHERE course_id=?", (str(course_id),)).fetchone()
     conn.close()
     return row["target_grade_pct"] if row else 90.0
+
+def set_grade_target_suggestion(course_id, suggested_target, reasoning):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO course_grade_goals (course_id, ai_suggested_target, ai_target_reasoning)
+        VALUES (?, ?, ?)
+        ON CONFLICT(course_id) DO UPDATE SET
+            ai_suggested_target=excluded.ai_suggested_target,
+            ai_target_reasoning=excluded.ai_target_reasoning
+    """, (str(course_id), suggested_target, reasoning))
+    conn.commit()
+    conn.close()
+
+def get_grade_target_suggestion(course_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT ai_suggested_target, ai_target_reasoning FROM course_grade_goals WHERE course_id=?",
+        (str(course_id),)
+    ).fetchone()
+    conn.close()
+    if row and row["ai_suggested_target"] is not None:
+        return {"target": row["ai_suggested_target"], "reasoning": row["ai_target_reasoning"]}
+    return None
 
 def delete_grade(assignment_id):
     conn = get_conn()
@@ -794,3 +847,95 @@ def get_semester_completed_count():
     """).fetchone()
     conn.close()
     return row["cnt"] if row else 0
+
+
+# --- Assignment Groups ---
+
+def upsert_assignment_group(course_id: str, canvas_group_id: int, name: str, weight: float):
+    pk = f"{course_id}:{canvas_group_id}"
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO assignment_groups (pk, course_id, canvas_group_id, name, weight) VALUES (?,?,?,?,?)",
+            (pk, str(course_id), canvas_group_id, name, weight)
+        )
+
+def get_assignment_groups(course_id: str) -> list:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT canvas_group_id, name, weight FROM assignment_groups WHERE course_id=? ORDER BY name",
+            (str(course_id),)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def set_assignment_canvas_group(assignment_id: str, canvas_group_id: int):
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE assignments SET canvas_group_id=? WHERE id=?",
+            (canvas_group_id, assignment_id)
+        )
+
+def get_all_assignments_for_course(course_id: str) -> list:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, canvas_group_id, title, due_at, points_possible FROM assignments WHERE course_id=?",
+            (str(course_id),)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_resubmittable_assignments(course_id: str = None) -> list:
+    """Return graded assignments where resubmission is allowed and score < 100%."""
+    with _connect() as conn:
+        if course_id:
+            rows = conn.execute("""
+                SELECT a.id, a.title, a.course_id, a.course_name, a.points_possible,
+                       a.canvas_group_id, a.html_url, a.analysis_json,
+                       g.grade_pct, g.points_earned
+                FROM assignments a
+                JOIN grades g ON g.assignment_id = a.id
+                WHERE a.can_resubmit = 1 AND g.grade_pct < 99 AND a.course_id = ?
+                ORDER BY g.grade_pct ASC
+            """, (str(course_id),)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT a.id, a.title, a.course_id, a.course_name, a.points_possible,
+                       a.canvas_group_id, a.html_url, a.analysis_json,
+                       g.grade_pct, g.points_earned
+                FROM assignments a
+                JOIN grades g ON g.assignment_id = a.id
+                WHERE a.can_resubmit = 1 AND g.grade_pct < 99
+                ORDER BY g.grade_pct ASC
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+def get_extra_credit_assignments() -> list:
+    """Return unsubmitted/ungraded extra credit assignments (by title or by group name)."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT a.id, a.title, a.course_id, a.course_name, a.points_possible,
+                   a.canvas_group_id, a.html_url, a.due_at, a.analysis_json,
+                   a.status, a.estimated_hours
+            FROM assignments a
+            LEFT JOIN grades g ON g.assignment_id = a.id
+            LEFT JOIN assignment_groups ag ON ag.canvas_group_id = a.canvas_group_id AND ag.course_id = a.course_id
+            WHERE (
+                LOWER(a.title) LIKE '[ec]%'
+                OR LOWER(a.title) LIKE '%(ec)%'
+                OR LOWER(a.title) LIKE '%extra credit%'
+                OR LOWER(ag.name) LIKE '%extra credit%'
+                OR LOWER(ag.name) LIKE '%bonus%'
+            )
+            AND g.id IS NULL
+            AND a.status NOT IN ('submitted', 'complete')
+            ORDER BY a.course_name, a.due_at
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+def get_group_total_points(course_id: str, canvas_group_id: int) -> float:
+    """Return total points_possible for all assignments in a group."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT SUM(points_possible) FROM assignments WHERE course_id=? AND canvas_group_id=? AND points_possible > 0",
+            (str(course_id), canvas_group_id)
+        ).fetchone()
+        return row[0] or 0.0
