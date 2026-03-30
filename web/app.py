@@ -347,6 +347,61 @@ def dashboard():
 
     week_synthesis = db.get_pref("week_synthesis") or ""
 
+    # --- Daily Digest: real-time actionable data ---
+    today_date = now.date()
+    tomorrow_date = (now + timedelta(days=1)).date()
+
+    # Grab overdue ones (past due, not submitted) for daily digest
+    with db._connect() as _conn:
+        overdue_rows = _conn.execute("""
+            SELECT a.* FROM assignments a
+            LEFT JOIN courses c ON c.id = a.course_id
+            WHERE a.due_at < datetime('now')
+              AND a.status NOT IN ('submitted', 'complete')
+              AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+            ORDER BY a.due_at ASC
+        """).fetchall()
+    overdue_asgns = [_enrich_assignment(dict(r)) for r in overdue_rows]
+
+    dd_due_today = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == today_date]
+    dd_due_tomorrow = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == tomorrow_date]
+
+    # Should start today: assignments where start_by date is today
+    import math as _math
+    dd_start_today = []
+    for a in assignments:
+        if not a.get("due_dt"):
+            continue
+        if a["due_dt"].date() == today_date:
+            continue  # already in due_today
+        est_hours = a.get("estimated_hours") or 2.0
+        days_to_start = _math.ceil(est_hours / 3)
+        ideal_start = a["due_dt"].date() - timedelta(days=days_to_start)
+        if ideal_start <= today_date < a["due_dt"].date():
+            dd_start_today.append(a)
+
+    # Exam countdown (within 7 days)
+    dd_exam_countdown = []
+    for e in upcoming_exams:
+        days_until = e.get("days_until", 99)
+        if days_until is not None and days_until <= 7:
+            dd_exam_countdown.append(e)
+
+    # Grade warnings (courses below target)
+    dd_grade_warnings = []
+    for snap in grade_snapshot:
+        if snap.get("on_track") is False and snap.get("current_avg") is not None:
+            dd_grade_warnings.append(snap)
+
+    daily_digest = {
+        "due_today": dd_due_today,
+        "due_tomorrow": dd_due_tomorrow,
+        "overdue": overdue_asgns,
+        "should_start_today": dd_start_today,
+        "exam_countdown": dd_exam_countdown,
+        "grade_warnings": dd_grade_warnings,
+    }
+
     return render_template("dashboard.html",
         greeting=greeting,
         today_str=now.strftime("%A, %B %d"),
@@ -367,6 +422,7 @@ def dashboard():
         grade_snapshot=grade_snapshot,
         week_glance=week_glance,
         week_synthesis=week_synthesis,
+        daily_digest=daily_digest,
     )
 
 
@@ -616,16 +672,37 @@ def assignment_detail(assignment_id):
     syllabi = db.get_syllabus(str(a.get("course_id", "")))
     course_materials = _relevant_course_materials(a.get("title", ""), syllabi)
 
-    # task_sections and course_weight_context from analysis
+    # task_sections, course_weight_context, and study_strategy from analysis
     task_sections = []
     course_weight_context = ""
+    study_strategy = ""
     if a.get("analysis_json"):
         try:
             analysis_extra = json.loads(a["analysis_json"])
             task_sections = analysis_extra.get("task_sections") or []
             course_weight_context = analysis_extra.get("course_weight_context") or ""
+            study_strategy = analysis_extra.get("study_strategy") or ""
         except Exception:
             pass
+
+    # Grade Impact: how much this single assignment is worth toward the final grade
+    grade_impact_pct = None
+    try:
+        if a.get("canvas_group_id") and a.get("points_possible") and a.get("course_id"):
+            groups_for_impact = db.get_assignment_groups(str(a["course_id"]))
+            group_for_impact = next(
+                (g for g in groups_for_impact if g["canvas_group_id"] == a["canvas_group_id"]),
+                None
+            )
+            if group_for_impact and group_for_impact["weight"] > 0:
+                group_total = db.get_group_total_points(str(a["course_id"]), a["canvas_group_id"])
+                if group_total > 0:
+                    grade_impact_pct = round(
+                        (a["points_possible"] / group_total) * (group_for_impact["weight"] / 100) * 100,
+                        2
+                    )
+    except Exception:
+        pass
 
     # Procrastination scenarios
     schedule_scenarios = None
@@ -670,13 +747,29 @@ def assignment_detail(assignment_id):
         task_sections=task_sections,
         course_weight_context=course_weight_context,
         schedule_scenarios=schedule_scenarios,
+        grade_impact_pct=grade_impact_pct,
+        study_strategy=study_strategy,
     )
 
 
 @app.route("/assignments")
 def assignments_page():
-    assignments_raw = db.get_upcoming_assignments(days_ahead=90)
-    assignments = [_enrich_assignment(a) for a in assignments_raw]
+    # Fetch all assignments (including submitted) for accurate completion stats
+    with db._connect() as conn:
+        rows = conn.execute("""
+            SELECT a.* FROM assignments a
+            LEFT JOIN courses c ON c.id = a.course_id
+            WHERE a.due_at IS NOT NULL
+              AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+            ORDER BY a.due_at ASC
+        """).fetchall()
+    all_assignments_raw = [dict(r) for r in rows]
+    all_enriched = [_enrich_assignment(a) for a in all_assignments_raw]
+
+    # Only show upcoming (not submitted) by default
+    now = datetime.now()
+    assignments = [a for a in all_enriched if a.get("status") not in ("submitted", "complete")
+                   and a.get("due_dt") and a["due_dt"] > now - timedelta(hours=1)]
 
     # Attach checklist stats for completion % display
     for a in assignments:
@@ -684,10 +777,35 @@ def assignments_page():
         a["checklist_stats"] = stats
 
     courses = db.get_courses()
-    course_names = sorted(set(a["course_name"] for a in assignments if a.get("course_name")))
+    course_names = sorted(set(a["course_name"] for a in all_enriched if a.get("course_name")))
     total_hours = round(sum(a.get("estimated_hours") or 0 for a in assignments), 1)
-    return render_template("assignments.html", assignments=assignments, total=len(assignments),
-                           courses=courses, course_names=course_names, total_hours=total_hours)
+
+    # Completion stats per course (homework submitted count vs total)
+    course_completion = {}
+    for cname in course_names:
+        course_asgns = [a for a in all_enriched if a.get("course_name") == cname]
+        total = len(course_asgns)
+        submitted = sum(1 for a in course_asgns if a.get("status") in ("submitted", "complete"))
+        course_completion[cname] = {
+            "total": total,
+            "submitted": submitted,
+            "pct": round(submitted / total * 100) if total > 0 else 0,
+        }
+
+    # Overdue and not submitted
+    overdue = [a for a in all_enriched
+               if a.get("status") not in ("submitted", "complete")
+               and a.get("due_dt") and a["due_dt"] < now]
+
+    return render_template("assignments.html",
+                           assignments=assignments,
+                           all_assignments=all_enriched,
+                           overdue=overdue,
+                           total=len(assignments),
+                           courses=courses,
+                           course_names=course_names,
+                           total_hours=total_hours,
+                           course_completion=course_completion)
 
 
 @app.route("/exams")
@@ -706,21 +824,104 @@ def exam_detail(exam_id):
 
     study_tips = e.get("study_tips", [])
     reasoning = ""
+    daily_study_plan = []
     if e.get("analysis_json"):
         try:
             analysis = json.loads(e["analysis_json"])
             reasoning = analysis.get("reasoning", "")
             study_tips = analysis.get("study_tips", study_tips)
+            daily_study_plan = analysis.get("daily_study_plan", [])
         except Exception:
             pass
 
-    course_notes = db.get_course_notes(str(e.get("course_id", "")))
+    course_id = str(e.get("course_id", ""))
+    course_notes = db.get_course_notes(course_id)
+
+    # Weight of this exam in the course
+    exam_group_weight = None
+    try:
+        groups = db.get_assignment_groups(course_id)
+        exam_keywords = ["exam", "midterm", "final"]
+        for g in groups:
+            gname_lower = g["name"].lower()
+            if any(kw in gname_lower for kw in exam_keywords) and g["weight"] > 0:
+                exam_group_weight = g["weight"]
+                break
+    except Exception:
+        pass
+
+    # Current category grade for this exam's group
+    exam_category_current = None
+    exam_category_name = None
+    all_grades_for_exam = db.get_grades_for_course(course_id)
+    target_grade = db.get_grade_goal(course_id)
+    try:
+        groups = db.get_assignment_groups(course_id)
+        all_course_assignments = db.get_all_assignments_for_course(course_id)
+        for g in groups:
+            gname_lower = g["name"].lower()
+            if any(kw in gname_lower for kw in ["exam", "midterm", "final"]) and g["weight"] > 0:
+                exam_category_name = g["name"]
+                group_asgn_ids = {a["id"] for a in all_course_assignments
+                                  if a.get("canvas_group_id") == g["canvas_group_id"]}
+                graded = [gr for gr in all_grades_for_exam
+                          if gr.get("assignment_id") in group_asgn_ids and gr.get("grade_pct") is not None]
+                if graded:
+                    exam_category_current = round(sum(gr["grade_pct"] for gr in graded) / len(graded), 1)
+                break
+    except Exception:
+        pass
+
+    # Needed score on this exam to hit target
+    needed_on_exam = None
+    if exam_group_weight and exam_category_current is not None and target_grade:
+        try:
+            # Simplified: (target - current_category * (1 - exam_fraction)) / exam_fraction
+            # We don't know the exact fraction this exam is of the category,
+            # so just show needed vs target comparison
+            needed_on_exam = None  # complex, skip for now
+        except Exception:
+            pass
+
+    # Related graded assignments (what the exam likely covers)
+    recent_graded = []
+    try:
+        all_course_asgns = db.get_all_assignments_for_course(course_id)
+        graded_ids = {g["assignment_id"] for g in all_grades_for_exam}
+        graded_assignments = [a for a in all_course_asgns if a["id"] in graded_ids and a.get("due_at")]
+        graded_assignments.sort(key=lambda x: x["due_at"], reverse=True)
+        recent_graded = graded_assignments[:5]
+        # Attach grade info
+        grade_lookup = {g["assignment_id"]: g for g in all_grades_for_exam}
+        for ra in recent_graded:
+            gr = grade_lookup.get(ra["id"])
+            if gr:
+                ra["grade_pct"] = gr.get("grade_pct")
+                ra["points_earned"] = gr.get("points_earned")
+    except Exception:
+        pass
+
+    # Exam countdown
+    days_until_exam = None
+    if e.get("start_at"):
+        try:
+            exam_dt = _from_canvas_time(e["start_at"])
+            days_until_exam = max(0, (exam_dt.date() - date.today()).days)
+        except Exception:
+            pass
 
     return render_template("exam_detail.html",
         e=e,
         reasoning=reasoning,
         study_tips=study_tips,
         course_notes=course_notes,
+        daily_study_plan=daily_study_plan,
+        exam_group_weight=exam_group_weight,
+        exam_category_current=exam_category_current,
+        exam_category_name=exam_category_name,
+        target_grade=target_grade,
+        recent_graded=recent_graded,
+        days_until_exam=days_until_exam,
     )
 
 
@@ -920,6 +1121,20 @@ def mark_done_alias(assignment_id):
     db.update_assignment_status(assignment_id, "submitted")
     return jsonify({"status": "ok"})
 
+@app.route("/api/assignment/<assignment_id>/toggle-complete", methods=["POST"])
+def toggle_complete(assignment_id):
+    """Toggle assignment status between submitted and not_submitted."""
+    a = db.get_assignment_by_id(assignment_id)
+    if not a:
+        return jsonify({"error": "not found"}), 404
+    current_status = a.get("status", "pending")
+    if current_status in ("submitted", "complete"):
+        new_status = "not_submitted"
+    else:
+        new_status = "submitted"
+    db.update_assignment_status(assignment_id, new_status)
+    return jsonify({"status": "ok", "new_status": new_status})
+
 @app.route("/api/assignment/<assignment_id>/difficulty", methods=["POST"])
 def set_difficulty(assignment_id):
     data = request.get_json()
@@ -1060,9 +1275,12 @@ def grades_page():
                 "id": cid, "name": c["name"], "code": c.get("code", ""),
                 "graded_count": 0, "current_avg": None, "letter": "?",
                 "color": "muted", "target": db.get_grade_goal(cid),
-                "grades": [], "on_track": None,
+                "grades": [], "on_track": None, "canvas_grade": None,
                 "needed_on_final": None, "final_weight_pct": 0,
-                "category_grades": [],
+                "category_grades": [], "projected_optimistic": None,
+                "projected_realistic": None, "trend": "stable",
+                "trend_color": "muted", "trend_icon": "→",
+                "ai_suggested_target": None, "ai_target_reasoning": None,
             })
             continue
 
@@ -1076,28 +1294,42 @@ def grades_page():
 
         # Get assignment groups for this course
         groups = db.get_assignment_groups(cid)
-        group_map = {g["canvas_group_id"]: g for g in groups}
 
         # Calculate per-group grades
         category_grades = []
         final_group = None
         final_weight = None
+        projected_optimistic = None
+        projected_realistic = None
+        trend = "stable"
+        trend_color = "muted"
+        trend_icon = "→"
+
+        all_course_assignments = db.get_all_assignments_for_course(cid)
 
         for g in groups:
             if g["weight"] <= 0:
                 continue
             # Get assignments in this group
-            group_assignments = [a for a in db.get_all_assignments_for_course(cid)
+            group_assignments = [a for a in all_course_assignments
                                 if a.get("canvas_group_id") == g["canvas_group_id"]]
             group_assignment_ids = {a["id"] for a in group_assignments}
             # Get grades for those assignments
             graded = [gr for gr in course_grades if gr.get("assignment_id") in group_assignment_ids and gr.get("grade_pct") is not None]
+            graded_ids = {gr["assignment_id"] for gr in graded}
 
             group_avg = round(sum(g2["grade_pct"] for g2 in graded) / len(graded), 1) if graded else None
 
             gname_lower = g["name"].lower()
             is_final = "final exam" in gname_lower or (gname_lower == "final")
             has_ungraded = len(group_assignments) > len(graded)
+
+            # Points-based group calculations for projections
+            total_pts = sum((a.get("points_possible") or 0) for a in group_assignments if (a.get("points_possible") or 0) > 0)
+            graded_earned = sum(gr.get("points_earned", 0) or 0 for gr in graded)
+            graded_possible = sum(gr.get("points_possible", 0) or gr.get("a_points_possible", 0) or 0 for gr in graded)
+            ungraded_assignments = [a for a in group_assignments if a["id"] not in graded_ids]
+            ungraded_pts = sum((a.get("points_possible") or 0) for a in ungraded_assignments)
 
             category_grades.append({
                 "name": g["name"],
@@ -1106,6 +1338,10 @@ def grades_page():
                 "graded_count": len(graded),
                 "total_count": len(group_assignments),
                 "is_final": is_final,
+                "total_pts": total_pts,
+                "graded_earned": graded_earned,
+                "graded_possible": graded_possible,
+                "ungraded_pts": ungraded_pts,
             })
 
             if is_final and has_ungraded:
@@ -1119,6 +1355,71 @@ def grades_page():
         else:
             needed_on_final = None
             final_weight = 0
+
+        # --- Grade Impact Projections ---
+        # For each group, project optimistic (ace everything) and realistic (maintain current pace)
+        optimistic_total = 0.0
+        realistic_total = 0.0
+        projections_possible = False
+
+        for cat in category_grades:
+            w = cat["weight"] / 100.0
+            if w <= 0:
+                continue
+            total_pts = cat["total_pts"]
+            graded_earned = cat["graded_earned"]
+            graded_possible = cat["graded_possible"]
+            ungraded_pts = cat["ungraded_pts"]
+
+            if total_pts <= 0:
+                # Fall back to percentage average
+                if cat["current_pct"] is not None:
+                    optimistic_total += cat["current_pct"] * w
+                    realistic_total += cat["current_pct"] * w
+                continue
+
+            projections_possible = True
+            # Optimistic: assume 100% on all remaining
+            opt_earned = graded_earned + ungraded_pts
+            opt_pct = (opt_earned / total_pts * 100) if total_pts > 0 else 0
+            optimistic_total += opt_pct * w
+
+            # Realistic: assume current average on remaining
+            current_rate = (graded_earned / graded_possible) if graded_possible > 0 else 0.85
+            real_earned = graded_earned + current_rate * ungraded_pts
+            real_pct = (real_earned / total_pts * 100) if total_pts > 0 else 0
+            realistic_total += real_pct * w
+
+        projected_optimistic = round(optimistic_total, 1) if projections_possible else None
+        projected_realistic = round(realistic_total, 1) if projections_possible else None
+
+        # Compute grade trajectory: trend from graded assignments over time
+        graded_with_dates = []
+        for g_entry in course_grades:
+            aid = g_entry.get("assignment_id")
+            a_match = next((a for a in all_course_assignments if a["id"] == aid), None)
+            if a_match and a_match.get("due_at") and g_entry.get("grade_pct") is not None:
+                graded_with_dates.append((a_match["due_at"], g_entry["grade_pct"]))
+        graded_with_dates.sort(key=lambda x: x[0])
+
+        trend = "stable"
+        trend_color = "muted"
+        trend_icon = "→"
+        if len(graded_with_dates) >= 4:
+            half = len(graded_with_dates) // 2
+            first_half = [p for _, p in graded_with_dates[:half]]
+            second_half = [p for _, p in graded_with_dates[half:]]
+            first_avg = sum(first_half) / len(first_half)
+            second_avg = sum(second_half) / len(second_half)
+            diff = second_avg - first_avg
+            if diff > 3:
+                trend = "up"
+                trend_color = "green"
+                trend_icon = "↑"
+            elif diff < -3:
+                trend = "down"
+                trend_color = "red"
+                trend_icon = "↓"
 
         # AI-suggested target
         ai_suggestion = db.get_grade_target_suggestion(cid)
@@ -1138,6 +1439,11 @@ def grades_page():
             "ai_suggested_target": ai_suggestion.get("target") if ai_suggestion else None,
             "ai_target_reasoning": ai_suggestion.get("reasoning") if ai_suggestion else None,
             "category_grades": category_grades,
+            "projected_optimistic": projected_optimistic,
+            "projected_realistic": projected_realistic,
+            "trend": trend,
+            "trend_color": trend_color,
+            "trend_icon": trend_icon,
         })
 
     return render_template("grades.html",
