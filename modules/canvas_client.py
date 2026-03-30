@@ -189,3 +189,12 @@ def get_announcements(course_id, per_page=10):
     except Exception as e:
         logger.error(f"Failed to fetch announcements for course {course_id}: {e}")
         return []
+
+def get_assignment_groups(course_id):
+    """Return assignment groups with weights for a course."""
+    try:
+        groups = _get(f"{BASE}/api/v1/courses/{course_id}/assignment_groups", params={"per_page": 50})
+        return groups if isinstance(groups, list) else []
+    except Exception as e:
+        logger.error(f"Failed to fetch assignment groups for course {course_id}: {e}")
+        return []
