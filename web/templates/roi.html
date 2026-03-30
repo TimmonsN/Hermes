@@ -78,9 +78,11 @@
 <div class="roi-section">
   <h2>⭐ Extra Credit</h2>
   <p class="section-desc">Bonus points that aren't required — but every point counts toward the goal.</p>
-  <div class="roi-card">
-    {% if ec_ops %}
-    {% for r in ec_ops %}
+
+  {% if ec_independent %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--green); margin-bottom:6px;">Do Now — Complete Independently</div>
+  <div class="roi-card" style="margin-bottom:12px;">
+    {% for r in ec_independent %}
     <div class="roi-row">
       <div>
         <div class="roi-title">
@@ -101,10 +103,41 @@
       </div>
     </div>
     {% endfor %}
-    {% else %}
-    <div class="empty-state">No extra credit opportunities detected.</div>
-    {% endif %}
   </div>
+  {% endif %}
+
+  {% if ec_activity %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Other Opportunities — Requires Class/Event Attendance</div>
+  <div class="roi-card" style="margin-bottom:4px;">
+    <div style="font-size:11px; color:var(--muted); margin-bottom:10px; font-style:italic;">These require attending class activities or events — keep them in mind when you're there.</div>
+    {% for r in ec_activity %}
+    <div class="roi-row">
+      <div>
+        <div class="roi-title">
+          {% if r.html_url %}<a href="{{ r.html_url }}" target="_blank" style="color:var(--text); text-decoration:none;">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}
+          &nbsp;<a href="/assignments/{{ r.id }}" style="font-size:11px; color:var(--accent);">details</a>
+        </div>
+        <div class="roi-course">{{ r.course_name }}</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+          {% if r.due_fmt %}<span class="{{ r.due_class }}">Due {{ r.due_fmt }}</span>{% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="roi-impact" style="color:var(--muted);">
+          {% if r.grade_impact %}+{{ r.grade_impact }}%{% else %}+{{ r.points_possible }}pts{% endif %}
+        </div>
+        <div class="roi-meta">{{ r.points_possible }} pts available</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if not ec_independent and not ec_activity %}
+  <div class="roi-card">
+    <div class="empty-state">No extra credit opportunities detected.</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Skip candidates -->

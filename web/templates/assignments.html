@@ -214,7 +214,10 @@
           {% if a.can_resubmit %}<span class="tag tag-bonus">resub</span>{% endif %}
           {% if not a.difficulty and not is_done %}<span class="tag">analyzing...</span>{% endif %}
         </td>
-        <td>
+        <td style="white-space:nowrap;">
+          {% if a.html_url and not is_done %}
+          <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="font-size:11px; padding:3px 8px; color:var(--accent); border-color:var(--accent); margin-right:4px;">Submit →</a>
+          {% endif %}
           <button class="btn btn-ghost" id="done-{{ a.id }}"
                   style="font-size:11px; padding:3px 8px; {% if is_done %}color:var(--muted); border-color:var(--border);{% else %}color:var(--green); border-color:var(--green);{% endif %}"
                   onclick="toggleDoneRow('{{ a.id }}', this, {{ 'true' if is_done else 'false' }})">{{ 'Undo' if is_done else 'Done' }}</button>

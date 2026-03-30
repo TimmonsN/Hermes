@@ -155,7 +155,7 @@
       <div class="plan-entry-note">
         <span style="color:var(--accent); font-size:11px; text-transform:uppercase; letter-spacing:0.4px;">Start Today — {{ a.course_name }}</span>
         <br>
-        <a href="/assignments/{{ a.id }}" style="color:var(--muted); text-decoration:none;">{{ a.title }}</a>
+        <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ a.title }}</a>
         <span style="color:var(--muted); font-size:11px; margin-left:6px;">due {{ a.due_fmt }}</span>
       </div>
       <div class="plan-entry-hours" style="color:var(--accent);">~{{ a.estimated_hours or '?' }}h total</div>
@@ -171,7 +171,11 @@
         <span style="color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:0.4px;">{{ entry.course_name }}</span>
         <br>
         {% endif %}
+        {% if entry.assignment_id and entry.title %}
+        <a href="/assignments/{{ entry.assignment_id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ entry.title }}</a>
+        {% else %}
         {{ entry.title or entry.note }}
+        {% endif %}
         {% if entry.due_at %}
         <span style="color:var(--muted); font-size:11px; margin-left:8px;">due {{ entry.due_at[:10] }}</span>
         {% endif %}

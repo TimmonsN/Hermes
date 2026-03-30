@@ -498,6 +498,67 @@ def dashboard():
 
     week_synthesis = db.get_pref("week_synthesis") or ""
 
+    # --- Tonight's Study Session Plan ---
+    TONIGHT_HOURS = 3.0
+    session_plan = []
+    remaining_hrs = TONIGHT_HOURS
+    pending_for_session = [
+        a for a in assignments
+        if a.get("status") not in ("submitted", "complete") and a.get("due_dt")
+    ]
+    pending_for_session.sort(key=lambda x: x.get("priority_score", 0), reverse=True)
+    for a in pending_for_session[:5]:
+        hrs = min(a.get("estimated_hours") or 1.0, remaining_hrs)
+        if hrs < 0.25:
+            break
+        session_plan.append({**a, "session_hours": round(hrs, 1)})
+        remaining_hrs -= hrs
+        if remaining_hrs <= 0:
+            break
+
+    # --- Grade Recovery: resubmittable assignments that move the grade meaningfully ---
+    grade_recovery = []
+    try:
+        resub = db.get_resubmittable_assignments()
+        for r in resub[:3]:
+            groups = db.get_assignment_groups(str(r["course_id"]))
+            grp = next((g for g in groups if g["canvas_group_id"] == r.get("canvas_group_id")), None)
+            if grp and grp["weight"] > 0:
+                total_pts = db.get_group_total_points(str(r["course_id"]), r["canvas_group_id"])
+                if total_pts > 0 and r.get("points_possible"):
+                    current_pct = r.get("grade_pct", 0) or 0
+                    potential_gain = ((100 - current_pct) / 100) * r["points_possible"]
+                    grade_impact = round((potential_gain / total_pts) * grp["weight"], 2)
+                    if grade_impact >= 0.3:
+                        grade_recovery.append({**r, "grade_impact": grade_impact})
+    except Exception:
+        pass
+
+    # --- Single best action: highest priority_score assignment not submitted ---
+    top_action = None
+    for a in sorted(assignments, key=lambda x: x.get("priority_score", 0), reverse=True):
+        if a.get("status") not in ("submitted", "complete"):
+            top_action = a
+            break
+
+    # Attach grade_impact_pct to top_action if available
+    if top_action:
+        try:
+            if top_action.get("canvas_group_id") and top_action.get("points_possible") and top_action.get("course_id"):
+                groups_for_top = db.get_assignment_groups(str(top_action["course_id"]))
+                group_for_top = next(
+                    (g for g in groups_for_top if g["canvas_group_id"] == top_action["canvas_group_id"]),
+                    None
+                )
+                if group_for_top and group_for_top["weight"] > 0:
+                    group_total = db.get_group_total_points(str(top_action["course_id"]), top_action["canvas_group_id"])
+                    if group_total > 0:
+                        top_action["grade_impact_pct"] = round(
+                            (top_action["points_possible"] / group_total) * (group_for_top["weight"] / 100) * 100, 2
+                        )
+        except Exception:
+            pass
+
     # --- Daily Digest: real-time actionable data ---
     today_date = now.date()
     tomorrow_date = (now + timedelta(days=1)).date()
@@ -594,6 +655,9 @@ def dashboard():
         week_glance=week_glance,
         week_synthesis=week_synthesis,
         daily_digest=daily_digest,
+        top_action=top_action,
+        grade_recovery=grade_recovery,
+        session_plan=session_plan,
     )
 
 
@@ -882,6 +946,48 @@ def assignment_detail(assignment_id):
     except Exception:
         pass
 
+    # Find Canvas announcements mentioning this assignment title
+    relevant_announcements = []
+    try:
+        all_announcements = db.get_announcements_for_course(str(a.get("course_id", "")), limit=50)
+        title_words = set((a.get("title") or "").lower().split()) - {"the", "a", "an", "for", "and", "or", "in", "of", "to", "with"}
+        for ann in all_announcements:
+            ann_text = ((ann.get("title") or "") + " " + (ann.get("message") or "")).lower()
+            if sum(1 for w in title_words if w in ann_text and len(w) > 3) >= 2:
+                relevant_announcements.append(ann)
+    except Exception:
+        pass
+
+    # Office hours from syllabus
+    office_hours = ""
+    try:
+        import re as _re_oh
+        syllabi_oh = db.get_syllabus(str(a.get("course_id", "")))
+        for s in syllabi_oh:
+            rules_oh = json.loads(s["rules_json"]) if s.get("rules_json") else {}
+            oh = rules_oh.get("office_hours") or ""
+            if oh and len(oh) > 5:
+                office_hours = oh
+                break
+        if not office_hours:
+            for s in syllabi_oh:
+                content_oh = s.get("content", "") or ""
+                match_oh = _re_oh.search(r'office hours?[:\s]+([^\n\.]{10,80})', content_oh, _re_oh.IGNORECASE)
+                if match_oh:
+                    office_hours = match_oh.group(1).strip()
+                    break
+    except Exception:
+        pass
+
+    # days_until for due date check
+    days_until = None
+    try:
+        if a.get("due_at"):
+            due_dt_check = _from_canvas_time(a["due_at"])
+            days_until = (due_dt_check - datetime.now()).days
+    except Exception:
+        pass
+
     # Procrastination scenarios
     schedule_scenarios = None
     est_hours = a.get("estimated_hours")
@@ -928,6 +1034,9 @@ def assignment_detail(assignment_id):
         grade_impact_pct=grade_impact_pct,
         study_strategy=study_strategy,
         description_status=description_status,
+        relevant_announcements=relevant_announcements,
+        office_hours=office_hours,
+        days_until=days_until,
     )
 
 
@@ -1089,6 +1198,31 @@ def exam_detail(exam_id):
         except Exception:
             pass
 
+    # Pre-exam topic map: weak areas and ungraded (likely exam content)
+    exam_topics = {}
+    try:
+        course_assignments_full = db.get_all_assignments_for_course(course_id)
+        course_grades_full = db.get_grades_for_course(course_id)
+        grade_map_full = {g["assignment_id"]: g for g in course_grades_full}
+
+        weak = []
+        for asgn in course_assignments_full:
+            g = grade_map_full.get(asgn["id"])
+            if g and g.get("grade_pct") is not None and g["grade_pct"] < 80:
+                weak.append({"title": asgn["title"], "grade_pct": g["grade_pct"], "id": asgn["id"]})
+
+        ungraded_upcoming = [
+            asgn for asgn in course_assignments_full
+            if asgn["id"] not in grade_map_full and asgn.get("due_at")
+        ]
+
+        exam_topics = {
+            "weak_areas": sorted(weak, key=lambda x: x["grade_pct"])[:5],
+            "upcoming": [{"title": asgn["title"], "id": asgn["id"]} for asgn in ungraded_upcoming if asgn.get("due_at")][:8],
+        }
+    except Exception:
+        exam_topics = {}
+
     return render_template("exam_detail.html",
         e=e,
         reasoning=reasoning,
@@ -1101,6 +1235,7 @@ def exam_detail(exam_id):
         target_grade=target_grade,
         recent_graded=recent_graded,
         days_until_exam=days_until_exam,
+        exam_topics=exam_topics,
     )
 
 
@@ -1389,16 +1524,36 @@ def reanalyze_all():
     conn.execute("UPDATE exam_events SET analysis_json=NULL, study_hours_estimated=NULL, start_study_by=NULL")
     conn.commit()
     conn.close()
+    # Track sync status
+    db.set_pref("reanalyze_status", "running")
+    db.set_pref("reanalyze_started", datetime.now().isoformat())
+    db.set_pref("reanalyze_finished", "")
     # Trigger sync in background to re-analyze
     import threading, sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    def _run_sync_and_finish():
+        try:
+            import hermes as h
+            h.sync_canvas()
+        except Exception:
+            pass
+        db.set_pref("reanalyze_status", "done")
+        db.set_pref("reanalyze_finished", datetime.now().isoformat())
     try:
-        import hermes as h
-        t = threading.Thread(target=h.sync_canvas, daemon=True)
+        t = threading.Thread(target=_run_sync_and_finish, daemon=True)
         t.start()
     except Exception:
-        pass
+        db.set_pref("reanalyze_status", "idle")
     return jsonify({"status": "re-analysis started — refresh in a minute"})
+
+
+@app.route("/api/sync-status")
+def sync_status():
+    """Return current re-analysis/sync status for dashboard polling."""
+    status = db.get_pref("reanalyze_status") or "idle"
+    started = db.get_pref("reanalyze_started") or ""
+    finished = db.get_pref("reanalyze_finished") or ""
+    return jsonify({"status": status, "started": started, "finished": finished})
 
 
 # ─── Grades ───────────────────────────────────────────────────────────────────
@@ -1519,7 +1674,11 @@ def grades_page():
 
             # Points-based group calculations for projections
             total_pts = sum((a.get("points_possible") or 0) for a in group_assignments if (a.get("points_possible") or 0) > 0)
-            graded_earned = sum(gr.get("points_earned", 0) or 0 for gr in graded)
+            graded_earned = sum(
+                (gr.get("points_earned") or 0) if (gr.get("points_earned") or 0) > 0
+                else ((gr.get("grade_pct") or 0) / 100.0 * (gr.get("a_points_possible") or 0))
+                for gr in graded
+            )
             graded_possible = sum(gr.get("points_possible", 0) or gr.get("a_points_possible", 0) or 0 for gr in graded)
             ungraded_assignments = [a for a in group_assignments if a["id"] not in graded_ids]
             ungraded_pts = sum((a.get("points_possible") or 0) for a in ungraded_assignments)
@@ -1565,10 +1724,18 @@ def grades_page():
             ungraded_pts = cat["ungraded_pts"]
 
             if total_pts <= 0:
-                # Fall back to percentage average
+                # Group exists but no assignments linked (e.g. Final Exam before posted)
                 if cat["current_pct"] is not None:
                     optimistic_total += cat["current_pct"] * w
                     realistic_total += cat["current_pct"] * w
+                else:
+                    # Optimistic: assume 100%; Realistic: assume current overall course average
+                    optimistic_total += 100.0 * w
+                    if display_avg is not None:
+                        realistic_total += display_avg * w
+                    else:
+                        realistic_total += 75.0 * w  # reasonable default
+                    projections_possible = True
                 continue
 
             projections_possible = True
@@ -1617,6 +1784,20 @@ def grades_page():
         # AI-suggested target
         ai_suggestion = db.get_grade_target_suggestion(cid)
 
+        # Grade pattern recognition
+        patterns = []
+        for cat in category_grades:
+            if cat["current_pct"] is not None and cat["graded_count"] >= 2:
+                if display_avg and cat["current_pct"] < display_avg - 8:
+                    patterns.append(
+                        f"Your {cat['name']} average ({cat['current_pct']:.0f}%) is dragging down your overall grade — "
+                        f"this category is worth {cat['weight']:.0f}% of your final grade."
+                    )
+                elif display_avg and cat["current_pct"] > display_avg + 8:
+                    patterns.append(
+                        f"You're strong in {cat['name']} ({cat['current_pct']:.0f}%) — keep it up."
+                    )
+
         course_summaries.append({
             "id": cid, "name": c["name"], "code": c.get("code", ""),
             "graded_count": len(course_grades),
@@ -1637,6 +1818,7 @@ def grades_page():
             "trend": trend,
             "trend_color": trend_color,
             "trend_icon": trend_icon,
+            "patterns": patterns,
         })
 
     return render_template("grades.html",
@@ -1931,6 +2113,24 @@ def alerts_page():
                         "assignment_id": a["id"],
                     })
 
+    # Recently graded assignments with low scores
+    recent_grades_for_alert = sorted(
+        [g for g in all_grades_for_alert if g.get("grade_pct") is not None],
+        key=lambda x: x.get("entered_at", ""),
+        reverse=True
+    )
+    for g in recent_grades_for_alert[:10]:
+        if g.get("grade_pct", 100) < 75:
+            already = any(al.get("assignment_id") == g.get("assignment_id") for al in alerts)
+            if not already:
+                alerts.append({
+                    "level": "warning",
+                    "icon": "grade",
+                    "title": f"Low Grade: {g.get('title', 'Assignment')}",
+                    "message": f"You received {g['grade_pct']:.1f}% on {g.get('title','')} ({g.get('course_name','')}).",
+                    "assignment_id": g.get("assignment_id"),
+                })
+
     # Courses below target grade
     courses_all = db.get_courses()
     all_grades_for_alert = db.get_all_grades()
@@ -2121,6 +2321,18 @@ def roi_page():
         })
     ec_ops.sort(key=lambda x: x.get("grade_impact") or 0, reverse=True)
 
+    # Split EC into independent (can do now) vs activity-based
+    _EC_ACTIVITY_KEYWORDS = ["kudos", "outreach", "extension", "lecture", "lab extension",
+                             "in-class", "attendance", "participation", "k-12"]
+    ec_independent = []
+    ec_activity = []
+    for ec in ec_ops:
+        title_lower = (ec.get("title") or "").lower()
+        if any(kw in title_lower for kw in _EC_ACTIVITY_KEYWORDS):
+            ec_activity.append(ec)
+        else:
+            ec_independent.append(ec)
+
     # --- Low-weight assignments to consider skipping ---
     # Assignments worth <1% of final grade, unsubmitted, due >3 days away
     skip_candidates = []
@@ -2156,6 +2368,8 @@ def roi_page():
     return render_template("roi.html",
         resub_ops=resub_ops,
         ec_ops=ec_ops,
+        ec_independent=ec_independent,
+        ec_activity=ec_activity,
         skip_candidates=skip_candidates,
     )
 
@@ -2186,13 +2400,29 @@ def settings_page():
         t = _Cfg.CANVAS_TOKEN
         token_display = t[:6] + "..." + t[-4:] if len(t) > 10 else "set"
     courses = db.get_courses(include_ignored=True)
+    sync_hour_1 = int(db.get_pref("sync_hour_1") or 14)
+    sync_hour_2 = int(db.get_pref("sync_hour_2") or 20)
     return render_template("settings.html",
         last_sync=last_sync,
         token_display=token_display,
         canvas_url=getattr(_Cfg, "CANVAS_BASE_URL", ""),
         courses=courses,
         digest_hour=getattr(_Cfg, "DIGEST_HOUR", 8),
+        sync_hour_1=sync_hour_1,
+        sync_hour_2=sync_hour_2,
     )
+
+
+@app.route("/api/settings/sync-schedule", methods=["POST"])
+def save_sync_schedule():
+    data = request.get_json(force=True, silent=True) or {}
+    h1 = data.get("sync_hour_1")
+    h2 = data.get("sync_hour_2")
+    if h1 is not None:
+        db.set_pref("sync_hour_1", str(int(h1)))
+    if h2 is not None:
+        db.set_pref("sync_hour_2", str(int(h2)))
+    return jsonify({"status": "ok"})
 
 
 def run(port=5000, debug=False, use_reloader=True):

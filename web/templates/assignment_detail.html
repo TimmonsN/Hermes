@@ -313,12 +313,15 @@
 
 <!-- Action row -->
 <div class="action-row">
+  {% if a.html_url and a.status not in ('submitted', 'complete') %}
+  <a href="{{ a.html_url }}" target="_blank" class="btn btn-primary" style="text-decoration:none;">Open in Canvas to Submit →</a>
+  {% endif %}
   <button class="btn btn-ghost" style="color:var(--green); border-color:var(--green);"
           onclick="markDone('{{ a.id }}', this)">Mark Done</button>
   <button class="btn btn-ghost"
           onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
   <button class="btn btn-ghost" onclick="forceReanalyze('{{ a.id }}', this)" title="Clear stale analysis and re-analyze with current course materials">Re-analyze</button>
-  {% if a.html_url %}
+  {% if a.html_url and a.status in ('submitted', 'complete') %}
   <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost">Open in Canvas ↗</a>
   {% endif %}
   <a href="/chat/assignment/{{ a.id }}" class="btn btn-ghost" style="margin-left:auto;">Chat with Hermes →</a>
@@ -487,6 +490,25 @@
     {% endif %}
   </div>
   {% endfor %}
+</div>
+{% endif %}
+
+<!-- Instructor Announcements mentioning this assignment -->
+{% if relevant_announcements %}
+<div class="info-block">
+  <h3>Instructor Announcements</h3>
+  {% for ann in relevant_announcements %}
+  <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
+    <div style="font-size:13px; font-weight:600;">{{ ann.title }}</div>
+    <div style="font-size:12px; color:var(--muted); margin-top:4px;">{{ (ann.body or ann.message or '')[:300] }}{% if (ann.body or ann.message or '')|length > 300 %}...{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if office_hours and days_until is not none and days_until <= 5 %}
+<div style="font-size:12px; color:var(--muted); margin-top:-8px; margin-bottom:12px; padding:8px 14px; background:var(--surface); border:1px solid var(--border); border-radius:8px;">
+  Office hours: {{ office_hours }} — consider attending before this is due.
 </div>
 {% endif %}
 

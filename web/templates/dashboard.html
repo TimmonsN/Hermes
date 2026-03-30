@@ -113,6 +113,31 @@
   {% endif %}
 </div>
 
+<!-- Work on this NOW -->
+{% if top_action %}
+<div style="background: linear-gradient(135deg, rgba(124,108,255,0.15), rgba(124,108,255,0.05)); border: 1px solid rgba(124,108,255,0.3); border-radius:12px; padding:16px 20px; margin-bottom:16px;">
+  <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--accent); margin-bottom:6px;">Work on this now</div>
+  <a href="/assignments/{{ top_action.id }}" style="font-size:17px; font-weight:700; color:var(--text); text-decoration:none;">{{ top_action.title }}</a>
+  <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+    {{ top_action.course_name }} &nbsp;·&nbsp; {{ top_action.workload_label or '' }} &nbsp;·&nbsp; {{ top_action.due_fmt or '' }}
+    {% if top_action.grade_impact_pct %}&nbsp;·&nbsp; <span style="color:var(--accent);">{{ top_action.grade_impact_pct }}% of final grade</span>{% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Grade Recovery -->
+{% if grade_recovery %}
+<div style="background:rgba(74,222,128,0.07); border:1px solid rgba(74,222,128,0.2); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--green); margin-bottom:8px;">Grade Recovery — Resubmit These</div>
+  {% for r in grade_recovery %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(74,222,128,0.15); font-size:13px;">
+    <a href="/assignments/{{ r.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ r.title }}</a>
+    <span style="color:var(--green); font-size:12px; font-weight:600; flex-shrink:0; margin-left:8px;">+{{ r.grade_impact }}% final grade</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <!-- Daily Digest: what to do RIGHT NOW -->
 {% if daily_digest.overdue %}
 <div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
@@ -274,18 +299,108 @@
   </div>
 </div>
 
+{% if session_plan %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:16px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--accent); margin-bottom:10px;">Tonight's Study Plan (3h)</div>
+  {% for item in session_plan %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <div>
+      <span style="font-weight:600; color:var(--accent); margin-right:8px;">{{ item.session_hours }}h</span>
+      <a href="/assignments/{{ item.id }}" style="color:var(--text); text-decoration:none;">{{ item.title }}</a>
+      <span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ item.course_name }}</span>
+    </div>
+    <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ item.due_fmt or '' }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div id="syncProgress" style="display:none; margin-top:8px;">
+  <div style="background:var(--surface2); border-radius:4px; height:4px;">
+    <div id="syncProgressBar" style="background:var(--accent); height:4px; border-radius:4px; width:0%; transition:width 0.5s;"></div>
+  </div>
+  <div id="syncStatusText" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
+</div>
+
+<div id="analysisBanner" style="display:none; background:rgba(124,108,255,0.1); border:1px solid rgba(124,108,255,0.3); border-radius:8px; padding:10px 16px; margin-bottom:12px; font-size:13px; color:var(--accent);">
+  <span id="analysisBannerText">Hermes is re-analyzing assignments...</span>
+  <span style="display:inline-block; width:14px; height:14px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite; vertical-align:middle; margin-left:8px;"></span>
+</div>
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
 <script>
+let _syncPollTimer = null;
+
 async function triggerSync() {
   document.getElementById('syncBtn').textContent = 'Syncing...';
   await fetch('/api/sync', {method:'POST'});
   setTimeout(() => { document.getElementById('syncBtn').textContent = 'Sync Canvas'; location.reload(); }, 5000);
 }
+
 async function reanalyze() {
   if (!confirm('Clear all AI analysis and re-run? Takes about a minute.')) return;
-  document.getElementById('reanalyzeBtn').textContent = 'Working...';
+  document.getElementById('reanalyzeBtn').textContent = 'Reanalyzing...';
   await fetch('/api/reanalyze', {method:'POST'});
-  setTimeout(() => { location.reload(); }, 60000);
+  showSyncProgress();
+  startSyncPolling();
 }
+
+function showSyncProgress() {
+  const prog = document.getElementById('syncProgress');
+  prog.style.display = 'block';
+  const bar = document.getElementById('syncProgressBar');
+  const text = document.getElementById('syncStatusText');
+  const banner = document.getElementById('analysisBanner');
+  banner.style.display = 'block';
+  // Animate bar to 80% over 60s
+  let pct = 0;
+  const interval = setInterval(() => {
+    pct = Math.min(pct + 1.5, 80);
+    bar.style.width = pct + '%';
+    text.textContent = 'Reanalyzing... ' + Math.round(pct) + '%';
+    if (pct >= 80) clearInterval(interval);
+  }, 1000);
+  prog._progressInterval = interval;
+}
+
+function startSyncPolling() {
+  if (_syncPollTimer) clearInterval(_syncPollTimer);
+  _syncPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/sync-status');
+      const data = await resp.json();
+      if (data.status === 'done') {
+        clearInterval(_syncPollTimer);
+        _syncPollTimer = null;
+        const bar = document.getElementById('syncProgressBar');
+        bar.style.width = '100%';
+        document.getElementById('syncStatusText').textContent = 'Analysis complete!';
+        document.getElementById('analysisBannerText').textContent = 'Analysis complete — page will refresh.';
+        document.getElementById('reanalyzeBtn').textContent = 'Re-analyze All';
+        if (data.finished) {
+          const fin = new Date(data.finished);
+          document.getElementById('syncStatusText').textContent = 'Analysis complete at ' + fin.toLocaleTimeString();
+        }
+        setTimeout(() => location.reload(), 2000);
+      }
+    } catch(e) {}
+  }, 5000);
+}
+
+// On load, check if analysis is already running
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const resp = await fetch('/api/sync-status');
+    const data = await resp.json();
+    if (data.status === 'running') {
+      document.getElementById('analysisBanner').style.display = 'block';
+      document.getElementById('reanalyzeBtn').textContent = 'Reanalyzing...';
+      startSyncPolling();
+    }
+  } catch(e) {}
+});
 </script>
 
 {% if proactive_warnings %}
