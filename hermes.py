@@ -19,7 +19,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import Config
 import database as db
-from modules import canvas_client, analyzer, syllabus
+from modules import canvas_client, analyzer, syllabus, piazza_client
 from modules.scheduler_engine import (
     should_send_start_reminder, should_send_check_in,
     is_within_active_hours, get_early_bonus_window
@@ -121,6 +121,7 @@ def sync_canvas():
                 "rubric_text": _extract_rubric(a.get("rubric") or []),
             }
             assignment_id = db.upsert_assignment(data)
+            db.set_assignment_canvas_group(assignment_id, a.get("assignment_group_id"))
 
             # Auto-mark submitted/graded items from Canvas submission data
             submission = a.get("submission") or {}
@@ -163,8 +164,14 @@ def sync_canvas():
             "description": event.get("description", ""),
         })
 
-    # Syllabi
+    # Syllabi (PDFs + HTML from Canvas files)
     _sync_syllabi(courses)
+
+    # Assignment groups (grade weights from Canvas)
+    _sync_assignment_groups(courses)
+
+    # Canvas pages/modules (often contain assignment details not in files)
+    _sync_course_pages(courses)
 
     # Announcements
     _sync_announcements(courses)
@@ -172,8 +179,8 @@ def sync_canvas():
     # Grades — auto-sync from Canvas submissions
     _sync_grades(courses)
 
-    # Generate/refresh strategic course notes
-    _sync_course_notes(courses)
+    # Piazza posts → course materials + announcements
+    _sync_piazza(courses)
 
     # Clean up exam entries that slipped through old/looser keyword matching
     _clean_bad_exams()
@@ -195,21 +202,26 @@ def sync_canvas():
                 if cid not in rules_map:
                     rules_map[cid] = _get_syllabus_rules(cid)
                 if cid not in materials_map:
-                    materials_map[cid] = _get_course_materials(cid)
+                    materials_map[cid] = _get_course_materials_dict(cid)
                 if cid not in course_notes_map:
                     course_notes_map[cid] = db.get_course_notes(cid)
             try:
                 analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map, course_notes_map)
                 stored = 0
+                all_rate_limited = True
                 for a, analysis in zip(chunk, analyses):
                     if analysis.get("_rate_limited"):
                         continue  # don't store placeholder — will retry on next sync
+                    all_rate_limited = False
                     db.store_analysis(a["id"], analysis)
                     stored += 1
                     logger.info(f"    OK: {a['title']} | diff={analysis.get('difficulty')} "
                                 f"hrs={analysis.get('estimated_hours')} priority={analysis.get('priority')}")
                 if stored < len(chunk):
                     logger.warning(f"  Batch {batch_num}: {len(chunk)-stored} skipped (rate limited)")
+                if all_rate_limited:
+                    logger.warning("  Both providers rate-limited — aborting analysis queue until next sync.")
+                    break
             except Exception as e:
                 logger.warning(f"  Batch {batch_num} failed entirely: {e}")
             if batch_num < len(chunks):
@@ -229,6 +241,9 @@ def sync_canvas():
 
     db.set_pref("last_sync_time", datetime.now().isoformat())
     logger.info("Canvas sync complete.")
+
+    # Course notes run after analysis so they don't block the analysis queue
+    _sync_course_notes(courses)
 
 
 def _sync_syllabi(courses):
@@ -287,6 +302,48 @@ def _sync_syllabi(courses):
                     db.upsert_syllabus(str(cid), fname, new_hash, content, rules)
 
 
+def _sync_course_pages(courses):
+    """Ingest Canvas course pages (wiki pages / module pages).
+
+    Many professors post assignment details, rubrics, and course info as Canvas
+    pages rather than file uploads — especially important for courses with 0 files.
+    Page content is stored in syllabi table so it flows into all future analyses.
+    """
+    import re as _re
+    for course in courses:
+        cid = course["id"]
+        cname = course.get("name", "")
+        try:
+            pages = canvas_client.get_course_pages(cid)
+            if not pages:
+                continue
+            logger.info(f"  {cname}: found {len(pages)} Canvas pages")
+            for page in pages:
+                page_url = page.get("url") or page.get("page_id", "")
+                page_title = page.get("title", page_url)
+                if not page_url:
+                    continue
+                fname = f"__page__{page_url}"
+                # Fetch the page body
+                body_html = canvas_client.get_page_content(cid, page_url)
+                if not body_html or not body_html.strip():
+                    continue
+                new_hash = syllabus.hash_content(body_html.encode("utf-8"))
+                if new_hash == db.get_syllabus_hash(str(cid), fname):
+                    continue  # unchanged since last sync
+                # Strip HTML tags for plain text storage
+                content = _re.sub(r'<[^>]+>', ' ', body_html)
+                content = _re.sub(r'&\w+;', ' ', content)
+                content = _re.sub(r'\s+', ' ', content).strip()
+                content = syllabus.truncate_for_llm(content)
+                if not content or len(content) < 50:
+                    continue
+                logger.info(f"  Ingesting page: {cname} — {page_title}")
+                db.upsert_syllabus(str(cid), fname, new_hash, content, {})
+        except Exception as e:
+            logger.warning(f"Page sync failed for {cname}: {e}")
+
+
 def _get_syllabus_rules(course_id):
     syllabi = db.get_syllabus(str(course_id))
     rules = {}
@@ -315,6 +372,123 @@ def _get_course_materials(course_id, max_chars=1200):
     return "\n\n".join(snippets)[:max_chars]
 
 
+def _get_course_materials_dict(course_id: str) -> dict:
+    """Return {filename: full_content} for non-syllabus course materials."""
+    syllabi = db.get_syllabus(str(course_id))
+    result = {}
+    for s in syllabi:
+        fname = s.get("file_name", "")
+        if fname.startswith("__"):
+            continue
+        if canvas_client.is_syllabus_file(fname):
+            continue
+        content = s.get("content", "")
+        if content and len(content.strip()) > 100:
+            result[fname] = content
+    return result
+
+
+def _sync_assignment_groups(courses):
+    """Fetch Canvas assignment groups (grade weights) for each course."""
+    for c in courses:
+        cid = str(c.get("id", ""))
+        canvas_id = c.get("id")
+        if not canvas_id:
+            continue
+        try:
+            groups = canvas_client.get_assignment_groups(canvas_id)
+            for g in groups:
+                gid = g.get("id")
+                name = g.get("name", "")
+                weight = g.get("group_weight") or 0.0
+                if gid:
+                    db.upsert_assignment_group(cid, gid, name, weight)
+            if groups:
+                logger.info(f"  {c['name']}: synced {len(groups)} assignment groups")
+        except Exception as e:
+            logger.warning(f"  Assignment group sync failed for {c['name']}: {e}")
+
+
+def _sync_piazza(courses):
+    """Sync Piazza posts for any course that has a piazza_nid configured.
+
+    Instructor posts → stored as announcements.
+    All posts (especially assignment-detail notes) → stored as course materials
+    in the syllabi table so they feed into analysis prompts.
+
+    Auto-maps the env PIAZZA_NETWORK_ID to the matching course if piazza_nid
+    isn't set yet.
+    """
+    if not piazza_client.is_configured():
+        return
+
+    nid = Config.PIAZZA_NETWORK_ID
+
+    # Find which course this network belongs to
+    target_course = None
+    for c in courses:
+        if c.get("piazza_nid") == nid:
+            target_course = c
+            break
+
+    # Auto-detect: match by course code hint or pick the one with fewest files
+    if not target_course:
+        piazza_code = os.getenv("PIAZZA_COURSE_CODE", "2421")
+        for c in courses:
+            if piazza_code in c.get("name", "") or piazza_code in c.get("code", ""):
+                target_course = c
+                db.set_course_piazza_nid(str(c["id"]), nid)
+                logger.info(f"Auto-mapped Piazza network {nid} → {c['name']}")
+                break
+
+    if not target_course:
+        logger.warning("Could not map PIAZZA_NETWORK_ID to any active course. "
+                       "Set PIAZZA_COURSE_CODE in .env (e.g. PIAZZA_COURSE_CODE=2421)")
+        return
+
+    cid = str(target_course["id"])
+    cname = target_course.get("name", "")
+    logger.info(f"Syncing Piazza for {cname}...")
+
+    posts = piazza_client.get_posts(nid, limit=100)
+    if not posts:
+        return
+
+    instructors_notes = 0
+    materials_stored = 0
+
+    for post in posts:
+        subject = post.get("subject", "") or ""
+        content = post.get("content", "") or ""
+        instructor_answer = post.get("instructor_answer", "") or ""
+        post_id = post.get("id", "")
+        created = post.get("created", "")
+
+        # Instructor notes → announcements feed
+        if post.get("post_type") == "note" or "instructor" in " ".join(post.get("tags", [])).lower():
+            canvas_id = f"piazza_{post_id}"
+            if subject or content:
+                db.upsert_announcement(canvas_id, cid, cname, subject, content, created)
+                instructors_notes += 1
+
+        # Every post with real content → course material so Hermes can reference it
+        full_text = subject
+        if content:
+            full_text += f"\n{content}"
+        if instructor_answer:
+            full_text += f"\nInstructor answer: {instructor_answer}"
+
+        if len(full_text.strip()) > 50:
+            fname = f"__piazza__{post_id}"
+            new_hash = syllabus.hash_content(full_text.encode("utf-8"))
+            if new_hash != db.get_syllabus_hash(cid, fname):
+                truncated = syllabus.truncate_for_llm(full_text)
+                db.upsert_syllabus(cid, fname, new_hash, truncated, {})
+                materials_stored += 1
+
+    logger.info(f"Piazza sync for {cname}: {instructors_notes} announcements, {materials_stored} new/updated posts")
+
+
 def _sync_course_notes(courses):
     """Hermes's learn-and-grow mechanism.
 
@@ -323,8 +497,10 @@ def _sync_course_notes(courses):
     These notes are then injected into every future batch analysis and chat prompt,
     so Hermes gets smarter about each course over time as more data arrives.
 
-    Notes are only regenerated if there's new syllabus/grade data to learn from.
+    Also generates AI-suggested target grades for each course (shown on Grades page).
     """
+    courses_for_targets = []
+
     for course in courses:
         cid = str(course["id"])
         cname = course.get("name", "")
@@ -367,6 +543,45 @@ def _sync_course_notes(courses):
                 logger.info(f"Course notes generated for {cname}")
         except Exception as e:
             logger.warning(f"Course notes generation failed for {cname}: {e}")
+
+        # Collect data for batch grade target suggestions
+        remaining = [a for a in db.get_upcoming_assignments(days_ahead=90)
+                     if str(a.get("course_id")) == cid and a.get("status") not in ("submitted", "complete")]
+        remaining_hours = sum(a.get("estimated_hours") or 2.0 for a in remaining)
+        gw = rules_map.get("grading_weights", {})
+        courses_for_targets.append({
+            "id": cid,
+            "name": cname,
+            "current_grade": canvas_grade,
+            "remaining_count": len(remaining),
+            "remaining_hours": round(remaining_hours, 1),
+            "course_notes": db.get_course_notes(cid),
+            "grading_weights": json.dumps(gw) if gw else "unknown",
+        })
+
+    # Batch-generate grade target suggestions
+    if courses_for_targets:
+        try:
+            suggestions = analyzer.generate_grade_targets(courses_for_targets)
+            for course_data, suggestion in zip(courses_for_targets, suggestions):
+                target = suggestion.get("suggested_target")
+                reasoning = suggestion.get("reasoning", "")
+                if target is not None:
+                    db.set_grade_target_suggestion(course_data["id"], float(target), reasoning)
+                    logger.info(f"Grade target suggestion: {course_data['name']} → {target}%")
+        except Exception as e:
+            logger.warning(f"Grade target generation failed: {e}")
+
+    # Generate week synthesis
+    try:
+        upcoming = db.get_upcoming_assignments(days_ahead=14)
+        exams_soon = db.get_upcoming_exams(days_ahead=14)
+        synthesis = analyzer.generate_week_synthesis(upcoming, exams_soon)
+        if synthesis:
+            db.set_pref("week_synthesis", synthesis)
+            logger.info("Week synthesis updated.")
+    except Exception as e:
+        logger.warning(f"Week synthesis failed: {e}")
 
 
 def _sync_grades(courses):
@@ -511,15 +726,17 @@ def main():
     else:
         logger.info("SMS not configured — running in dashboard-only mode.")
 
-    # Flask's reloader spawns a monitor process + a worker process.
-    # Only start background jobs in the worker (WERKZEUG_RUN_MAIN=true) or
-    # when running without the reloader at all (env var absent).
-    is_reloader_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
-    reloader_active = "WERKZEUG_RUN_MAIN" in os.environ
-    if is_reloader_worker or not reloader_active:
-        # Only run startup sync if we haven't synced in the last 2 hours.
-        # This prevents the auto-reloader from burning through Gemini quota
-        # by re-syncing every time a file is saved during development.
+    # Disable the werkzeug file-watcher reloader in production.
+    # The reloader spawns a MONITOR process + a WORKER process — both would
+    # independently start syncs and schedulers, doubling every AI API call and
+    # burning through Gemini quota. launchd handles process management instead.
+    dev_mode = os.environ.get("HERMES_DEV", "").lower() in ("1", "true", "yes")
+
+    # Only the single production process (or the werkzeug worker) runs background jobs.
+    werkzeug_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    run_bg = not dev_mode or werkzeug_worker
+
+    if run_bg:
         last_sync = db.get_pref("last_sync_time")
         sync_age_hours = None
         if last_sync:
@@ -544,11 +761,8 @@ def main():
         logger.info(f"Scheduler running. Canvas sync at 2pm + 8pm. Digest at {Config.DIGEST_HOUR}:05.")
 
     logger.info(f"Starting web dashboard at http://localhost:{Config.WEB_PORT}")
-
-    # Web UI runs in main thread (blocking); use_reloader watches .py files
-    # and auto-restarts the server whenever you save a change.
     from web.app import run as run_web
-    run_web(port=Config.WEB_PORT, use_reloader=True)
+    run_web(port=Config.WEB_PORT, use_reloader=dev_mode)
 
 
 if __name__ == "__main__":
