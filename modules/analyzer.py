@@ -27,6 +27,42 @@ _BOILERPLATE_PHRASES = [
     "this is where you",
 ]
 
+_MATERIAL_STOP = {'with','this','that','from','have','will','assignment','homework',
+                  'worksheet','reflection','discussion','quiz','exam','project','lab',
+                  'and','the','for','not','are','but','you','your'}
+
+def _find_relevant_materials(title: str, materials_dict: dict, max_chars: int = 3000) -> str:
+    """Return content from files most relevant to this assignment title."""
+    if not materials_dict:
+        return ""
+    keywords = [w for w in re.split(r'\W+', title.lower()) if len(w) > 3 and w not in _MATERIAL_STOP]
+    if not keywords:
+        return ""
+
+    scored = []
+    for fname, content in materials_dict.items():
+        fname_lower = fname.lower()
+        score = sum(1 for kw in keywords if kw in fname_lower)
+        if score > 0:
+            scored.append((score, fname, content))
+
+    if not scored:
+        return ""
+
+    max_score = max(s for s, _, _ in scored)
+    best = [(fname, content) for s, fname, content in scored if s == max_score]
+
+    parts = []
+    total = 0
+    for fname, content in best[:2]:
+        if total >= max_chars:
+            break
+        snippet = content[:max_chars - total]
+        parts.append(f"[{fname}]\n{snippet.strip()}")
+        total += len(snippet)
+    return "\n\n".join(parts)
+
+
 def _is_boilerplate_description(description: str) -> bool:
     """Return True if the description is a Canvas submission placeholder, not real content."""
     if not description:
@@ -94,8 +130,8 @@ def _ask_groq(prompt: str, model: str = None, system_prompt: str = None) -> str:
     return response.choices[0].message.content
 
 
-def _ask(prompt: str, retries: int = 3) -> str:
-    """Send a prompt to Gemini. Falls back to Groq if Gemini is rate-limited after all retries."""
+def _ask(prompt: str, retries: int = 1) -> str:
+    """Send a prompt to Gemini. Falls back to Groq quickly if Gemini is rate-limited."""
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
     last_exc = None
     for attempt in range(retries + 1):
@@ -110,10 +146,9 @@ def _ask(prompt: str, retries: int = 3) -> str:
             if e.code == 429:
                 last_exc = e
                 if attempt < retries:
-                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                    wait = 15 * (2 ** attempt)  # 15s, then fall to Groq
                     logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
                     time.sleep(wait)
-                # else: fall through to Groq fallback below
             else:
                 raise  # non-429 Gemini error
 
@@ -265,13 +300,17 @@ Return ONLY valid JSON, no markdown."""
 
         return analysis
     except Exception as e:
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            logger.warning(f"Assignment analysis rate-limited for '{assignment.get('title')}' — will retry next sync.")
+            return _default_analysis()
         logger.error(f"Assignment analysis failed for '{assignment.get('title')}': {e}")
         return {
             "difficulty": 5, "estimated_hours": 2.0, "priority": "medium",
             "has_early_bonus": False, "early_bonus_details": "",
             "can_resubmit": False, "resubmit_details": "",
             "recommended_days_before_due": Config.BUFFER_DAYS,
-            "start_by": None, "reasoning": "Analysis failed — using defaults."
+            "start_by": None, "reasoning": "Analysis failed — using defaults.",
+            "_rate_limited": True,
         }
 
 
@@ -300,18 +339,22 @@ def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, cours
         rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
         rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
         raw_desc = a.get("description") or ""
-        materials = (course_materials_map or {}).get(str(a.get("course_id", "")), "")
+        materials_dict = (course_materials_map or {}).get(str(a.get("course_id", "")), {})
+        if isinstance(materials_dict, dict):
+            materials = _find_relevant_materials(a.get("title", ""), materials_dict)
+        else:
+            materials = materials_dict  # backward compat if string passed
         rubric = a.get("rubric_text", "")
         course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
         if _is_boilerplate_description(raw_desc):
             if materials:
-                desc = f"[No real Canvas description. Course material files found — use these to understand the assignment:]\n{materials[:600]}"
+                desc = f"[Assignment PDF content — use this to understand the assignment:]\n{materials[:2500]}"
             else:
                 desc = f"[No real description — Canvas submission link only. Infer from course name '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your academic knowledge.]"
         else:
             desc = raw_desc[:600]
             if materials:
-                desc += f"\n\nCourse materials context:\n{materials[:400]}"
+                desc += f"\n\nCourse materials context:\n{materials[:1500]}"
 
         lines.append(
             f"--- Assignment {idx + 1} ---\n"
@@ -350,6 +393,8 @@ Each object must have these fields:
   "study_suggestions": ["3-5 specific, actionable strategies for THIS assignment type"],
   "watch_outs": ["2-4 specific traps or failure modes for this assignment"],
   "course_strategy_note": "one sentence on how this fits into the course grade",
+  "task_sections": ["specific subtask 1 (est time)", "subtask 2 (est time)"],
+  "course_weight_context": "one sentence: what % of final grade this is worth and whether it's high/low stakes relative to the course",
   "reasoning": "2-3 calm, factual sentences explaining difficulty and time estimate"
 }}
 
@@ -360,6 +405,18 @@ TONE RULES — strictly enforced:
 - If description says "[No real description]", infer from course name + title using your academic knowledge.
 - study_suggestions must be SPECIFIC to this assignment type, not generic ("read the rubric" is not useful).
 - watch_outs must be things that commonly cause point deductions on THIS specific type of work.
+- task_sections: list 3-5 concrete sub-tasks with estimated time each ONLY if there's enough info from description/PDF to be specific; otherwise use an empty array [].
+- course_weight_context: one sentence stating the grade % impact and whether it's high or low stakes.
+
+PRIORITY & DIFFICULTY CALIBRATION — hard rules, no exceptions:
+- difficulty 8/10 → priority must be "high" (never "medium")
+- difficulty 9-10/10 → priority must be "critical"
+- estimated_hours ≥ 7h → priority must be at least "high"
+- estimated_hours ≥ 10h → priority must be "critical"
+- "medium" is for difficulty 5-7, estimated_hours 2-6h ONLY
+- "low" is only for trivial tasks: difficulty 1-4, < 2h of real work
+- A coding project worth 100+ points is NEVER "medium" or below
+- recommended_days_before_due must be at least ceil(estimated_hours / 3) — don't tell Niko to do 10h of work in one sitting
 
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
@@ -395,27 +452,108 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
                 analysis["start_by"] = None
         return results
 
+    def _enforce_calibration(results):
+        """Hard post-processing rules — Python enforces what the AI prompt says."""
+        import math
+        for a in results:
+            diff = a.get("difficulty") or 0
+            hrs = a.get("estimated_hours") or 0
+            p = a.get("priority", "medium")
+            if hrs >= 10:
+                a["priority"] = "critical"
+                if a.get("recommended_days_before_due") is not None:
+                    a["recommended_days_before_due"] = max(a["recommended_days_before_due"], math.ceil(hrs / 3))
+            elif hrs >= 7 or diff >= 9:
+                if p not in ("critical",):
+                    a["priority"] = "high"
+            elif diff >= 8:
+                if p == "medium" or p == "low":
+                    a["priority"] = "high"
+        return results
+
     # Try Gemini first, then Groq on 429
     try:
         raw = _ask(prompt)  # _ask already handles Gemini→Groq fallback internally
         results = _parse_batch_result(raw, len(assignments))
-        return _apply_start_by(results)
+        return _enforce_calibration(_apply_start_by(results))
 
     except ClientError as e:
         if e.code == 429:
-            # Both Gemini and Groq rate-limited (or Groq not configured)
             logger.warning(f"Batch fully rate-limited — returning defaults for {len(assignments)} assignments.")
             return [_default_analysis() for _ in assignments]
         logger.error(f"Batch API error ({e}), falling back to individual analysis")
     except Exception as e:
+        # If it's a rate limit from Groq (or any provider), don't fall to individual — they'll all fail too
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            logger.warning(f"Batch rate-limited (provider error) — returning defaults for {len(assignments)} assignments.")
+            return [_default_analysis() for _ in assignments]
         logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
 
-    # Parse/logic failure — try individual analysis
+    # Parse/logic failure (not rate limit) — try individual analysis
     fallback = []
     for a in assignments:
         rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-        fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
-    return fallback
+        result = analyze_assignment(a, rules, a.get("course_name", ""))
+        if result.get("_rate_limited"):
+            # Individual hit rate limit too — bail out of the loop
+            logger.warning(f"Individual fallback also rate-limited — stopping fallback loop.")
+            fallback.extend([_default_analysis() for _ in assignments[len(fallback):]])
+            break
+        fallback.append(result)
+    return _enforce_calibration(fallback)
+
+
+def generate_grade_targets(courses_data: list) -> list:
+    """Batch-generate realistic target grade suggestions for multiple courses.
+
+    courses_data: list of dicts with keys: name, current_grade, remaining_count,
+                  remaining_hours, course_notes, grading_weights
+
+    Returns list of dicts: {course_name, suggested_target, reasoning}
+    """
+    if not courses_data:
+        return []
+
+    lines = []
+    for i, c in enumerate(courses_data):
+        lines.append(
+            f"Course {i+1}: {c.get('name', 'Unknown')}\n"
+            f"  Current grade: {c.get('current_grade', 'unknown')}\n"
+            f"  Remaining assignments: {c.get('remaining_count', '?')} (~{c.get('remaining_hours', '?')}h of work)\n"
+            f"  Grading weights: {c.get('grading_weights', 'unknown')}\n"
+            f"  Course notes: {(c.get('course_notes') or 'None')[:200]}"
+        )
+
+    prompt = f"""Niko is a college student at Ohio State. Suggest a realistic but ambitious target grade for each course.
+
+{chr(10).join(lines)}
+
+For each course, suggest a target percentage that is:
+- Realistic given the current grade and remaining work
+- Ambitious but achievable with solid effort (not guaranteed, requires actual work)
+- Higher if the current grade is already strong and remaining work is manageable
+- Lower if the current grade is struggling or remaining work is very heavy
+- Never above 100%, never below current grade (can't go back in time)
+
+Return a JSON array with exactly {len(courses_data)} objects:
+[{{"course_name": "...", "suggested_target": 92.5, "reasoning": "One sentence explaining why this target makes sense."}}]
+
+Return ONLY valid JSON, no markdown."""
+
+    try:
+        raw = _ask(prompt)
+        text = raw.strip()
+        if text.startswith("```"):
+            parts = text.split("```")
+            text = parts[1] if len(parts) > 1 else text
+            if text.startswith("json"):
+                text = text[4:]
+        results = json.loads(text.strip())
+        if isinstance(results, list) and len(results) == len(courses_data):
+            return results
+    except Exception as e:
+        logger.error(f"generate_grade_targets failed: {e}")
+    return []
 
 
 def analyze_course_strategy(course_name: str, syllabus_text: str, current_grade: float = None) -> dict:
@@ -723,6 +861,42 @@ Niko: {user_message}"""
     except Exception as e:
         logger.error(f"Chat response failed: {e}")
         return "Hit an error — try again in a moment."
+
+
+def generate_week_synthesis(upcoming_assignments: list, upcoming_exams: list) -> str:
+    """Generate a 2-3 sentence week overview. Stored and shown at top of calendar."""
+    if not upcoming_assignments and not upcoming_exams:
+        return ""
+
+    now = datetime.now()
+
+    # Build a compact summary of what's coming up
+    lines = []
+    for a in upcoming_assignments[:15]:
+        due = a.get("due_at", "")[:10] if a.get("due_at") else "?"
+        lines.append(f"- {a.get('title')} ({a.get('course_name','')}) due {due} | {a.get('priority','?')} priority | ~{a.get('estimated_hours','?')}h")
+
+    for e in upcoming_exams[:5]:
+        date = e.get("start_at", "")[:10] if e.get("start_at") else "?"
+        lines.append(f"- EXAM: {e.get('title')} ({e.get('course_name','')}) on {date}")
+
+    prompt = f"""Today is {now.strftime('%A %B %d, %Y')}.
+
+Here's what Niko has coming up in the next 2 weeks:
+{chr(10).join(lines)}
+
+Write 2-3 sentences MAX summarizing:
+1. The roughest upcoming period (if any cluster of heavy work exists)
+2. The single most important thing to start NOW (if anything is urgent or high-effort)
+3. Any clear day(s) to use wisely
+
+Keep it direct, specific, and actionable. No preamble like "Looking at your schedule..." — just the insight. If there's nothing pressing, say so briefly."""
+
+    try:
+        return _ask(prompt)
+    except Exception as e:
+        logger.error(f"generate_week_synthesis failed: {e}")
+        return ""
 
 
 def generate_weekly_digest(assignments: list, exams: list, collision_report: dict) -> str:
