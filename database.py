@@ -202,6 +202,8 @@ def init_db():
         "ALTER TABLE course_grade_goals ADD COLUMN ai_suggested_target REAL",
         "ALTER TABLE course_grade_goals ADD COLUMN ai_target_reasoning TEXT",
         "ALTER TABLE assignments ADD COLUMN canvas_group_id INTEGER",
+        "ALTER TABLE assignments ADD COLUMN lock_at TIMESTAMP",
+        "ALTER TABLE courses ADD COLUMN term_name TEXT",
     ]:
         try:
             conn.execute(migration)
@@ -234,6 +236,12 @@ def get_courses(include_ignored=False):
         rows = conn.execute("SELECT * FROM courses WHERE is_active=1 AND (is_ignored IS NULL OR is_ignored=0)").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def get_course_by_id(course_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM courses WHERE id=?", (str(course_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 def set_course_ignored(course_id, ignored: bool):
     conn = get_conn()
@@ -306,34 +314,34 @@ def upsert_assignment(data: dict):
         if rubric_text is not None:
             c.execute("""
                 UPDATE assignments SET
-                    title=?, description=?, due_at=?, points_possible=?,
+                    title=?, description=?, due_at=?, lock_at=?, points_possible=?,
                     submission_types=?, html_url=?, course_name=?, rubric_text=?,
                     updated_at=CURRENT_TIMESTAMP
                 WHERE canvas_id=?
             """, (data["title"], data.get("description",""), data.get("due_at"),
-                  data.get("points_possible"), data.get("submission_types",""),
+                  data.get("lock_at"), data.get("points_possible"), data.get("submission_types",""),
                   data.get("html_url",""), data.get("course_name",""), rubric_text,
                   data["canvas_id"]))
         else:
             c.execute("""
                 UPDATE assignments SET
-                    title=?, description=?, due_at=?, points_possible=?,
+                    title=?, description=?, due_at=?, lock_at=?, points_possible=?,
                     submission_types=?, html_url=?, course_name=?,
                     updated_at=CURRENT_TIMESTAMP
                 WHERE canvas_id=?
             """, (data["title"], data.get("description",""), data.get("due_at"),
-                  data.get("points_possible"), data.get("submission_types",""),
+                  data.get("lock_at"), data.get("points_possible"), data.get("submission_types",""),
                   data.get("html_url",""), data.get("course_name",""), data["canvas_id"]))
         assignment_id = existing["id"]
     else:
         assignment_id = f"{data['course_id']}_{data['canvas_id']}"
         c.execute("""
             INSERT INTO assignments
-                (id, canvas_id, course_id, course_name, title, description, due_at,
+                (id, canvas_id, course_id, course_name, title, description, due_at, lock_at,
                  points_possible, submission_types, html_url, rubric_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (assignment_id, data["canvas_id"], data["course_id"], data.get("course_name",""),
-              data["title"], data.get("description",""), data.get("due_at"),
+              data["title"], data.get("description",""), data.get("due_at"), data.get("lock_at"),
               data.get("points_possible"), data.get("submission_types",""), data.get("html_url",""),
               data.get("rubric_text")))
 

@@ -351,7 +351,10 @@ def dashboard():
     today_date = now.date()
     tomorrow_date = (now + timedelta(days=1)).date()
 
-    # Grab overdue ones (past due, not submitted) for daily digest
+    # Grab overdue assignments that can STILL be submitted for credit.
+    # Excluded if: submission window is closed (lock_at in the past),
+    # submission_types is 'none' (not a real submission), or the course
+    # is from a past term (term_name doesn't contain the current year/SP26).
     with db._connect() as _conn:
         overdue_rows = _conn.execute("""
             SELECT a.* FROM assignments a
@@ -359,9 +362,25 @@ def dashboard():
             WHERE a.due_at < datetime('now')
               AND a.status NOT IN ('submitted', 'complete')
               AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+              AND (a.submission_types IS NULL
+                   OR a.submission_types = ''
+                   OR a.submission_types != 'none')
+              AND (a.lock_at IS NULL OR a.lock_at > datetime('now'))
             ORDER BY a.due_at ASC
         """).fetchall()
-    overdue_asgns = [_enrich_assignment(dict(r)) for r in overdue_rows]
+    # Further filter: only include assignments from courses in the current term.
+    # Use course term_name if available; otherwise allow it through (don't filter blind).
+    def _is_current_term_assignment(row):
+        cid = str(row.get("course_id", ""))
+        course_row = db.get_course_by_id(cid) if cid else None
+        if course_row:
+            term = course_row.get("term_name", "") or ""
+            if term and "SP26" not in term and "Spring 2026" not in term and "2026" not in term:
+                return False
+        return True
+
+    overdue_asgns = [_enrich_assignment(dict(r)) for r in overdue_rows
+                     if _is_current_term_assignment(dict(r))]
 
     dd_due_today = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == today_date]
     dd_due_tomorrow = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == tomorrow_date]
@@ -1644,15 +1663,30 @@ def alerts_page():
 
     alerts = []
 
-    # Overdue items
+    # Overdue items — only ones where submission is still open
     for a in assignments:
-        if a.get("due_dt") and (a["due_dt"] - now).total_seconds() < 0 and a.get("status") != "submitted":
-            alerts.append({
-                "level": "danger", "icon": "overdue",
-                "title": "Overdue",
-                "message": f"{a['title']} ({a.get('course_name','')}) was due {a['due_fmt']}.",
-                "assignment_id": a["id"],
-            })
+        if not (a.get("due_dt") and (a["due_dt"] - now).total_seconds() < 0):
+            continue
+        if a.get("status") in ("submitted", "complete"):
+            continue
+        # Skip if Canvas has closed the submission window
+        lock_at = a.get("lock_at")
+        if lock_at:
+            try:
+                lock_dt = _from_canvas_time(lock_at)
+                if lock_dt < now:
+                    continue  # window closed — nothing to do
+            except Exception:
+                pass
+        # Skip non-submittable types
+        if a.get("submission_types") in ("none", "not_graded"):
+            continue
+        alerts.append({
+            "level": "danger", "icon": "overdue",
+            "title": "Overdue — Still Submittable",
+            "message": f"{a['title']} ({a.get('course_name','')}) was due {a['due_fmt']} — check if late submission is accepted.",
+            "assignment_id": a["id"],
+        })
 
     # Heavy workload next 48h
     next_48h = [a for a in assignments if a.get("due_dt") and 0 <= (a["due_dt"] - now).total_seconds() / 3600 <= 48]

@@ -94,6 +94,17 @@ def sync_canvas():
         name = course.get("name", "Unknown")
         code = course.get("course_code", "")
         db.upsert_course(cid, name, code)
+        # Store term name so we can filter out past-term courses in the UI
+        term = course.get("term") or {}
+        term_name = term.get("name", "")
+        if term_name:
+            try:
+                conn = db.get_conn()
+                conn.execute("UPDATE courses SET term_name=? WHERE id=?", (term_name, str(cid)))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
         course_ids.append(cid)
 
     new_for_analysis = []
@@ -115,6 +126,7 @@ def sync_canvas():
                 "title": title,
                 "description": a.get("description", ""),
                 "due_at": a.get("due_at"),
+                "lock_at": a.get("lock_at"),  # when Canvas closes submissions
                 "points_possible": a.get("points_possible"),
                 "submission_types": ",".join(a.get("submission_types", [])),
                 "html_url": a.get("html_url", ""),
