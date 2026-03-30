@@ -2012,6 +2012,9 @@ def alerts_page():
 
     alerts = []
 
+    # Pre-load grades for alert logic (used in multiple sections below)
+    all_grades_for_alert = db.get_all_grades()
+
     # Overdue items — Hermes determines if each can still earn points
     for a in assignments:
         if not (a.get("due_dt") and (a["due_dt"] - now).total_seconds() < 0):
@@ -2133,7 +2136,6 @@ def alerts_page():
 
     # Courses below target grade
     courses_all = db.get_courses()
-    all_grades_for_alert = db.get_all_grades()
     for c in courses_all:
         cid = c["id"]
         canvas_grade = c.get("canvas_grade_pct")

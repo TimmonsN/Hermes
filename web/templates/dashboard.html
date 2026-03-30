@@ -77,9 +77,15 @@
 {% block content %}
 <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
   <h1>Good {{ greeting }}, Niko.</h1>
-  <div style="display:flex; gap:8px;">
-    <button class="btn btn-ghost" onclick="triggerSync()" style="font-size:12px;" id="syncBtn">Sync Canvas</button>
-    <button class="btn btn-ghost" onclick="reanalyze()" style="font-size:12px;" id="reanalyzeBtn">Re-analyze All</button>
+  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-ghost" onclick="triggerSync()" style="font-size:12px;" id="syncBtn">Sync Canvas</button>
+      <button class="btn btn-ghost" onclick="reanalyze()" style="font-size:12px;" id="reanalyzeBtn">Re-analyze All</button>
+    </div>
+    <div id="reanalyzeStatus" style="display:none; font-size:11px; color:var(--accent); display:flex; align-items:center; gap:6px;">
+      <span style="display:inline-block; width:10px; height:10px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+      <span id="reanalyzeStatusText">Hermes is re-analyzing — this takes ~60s</span>
+    </div>
   </div>
 </div>
 <p class="subtitle">
@@ -315,89 +321,70 @@
 </div>
 {% endif %}
 
-<div id="syncProgress" style="display:none; margin-top:8px;">
-  <div style="background:var(--surface2); border-radius:4px; height:4px;">
-    <div id="syncProgressBar" style="background:var(--accent); height:4px; border-radius:4px; width:0%; transition:width 0.5s;"></div>
-  </div>
-  <div id="syncStatusText" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
-</div>
-
-<div id="analysisBanner" style="display:none; background:rgba(124,108,255,0.1); border:1px solid rgba(124,108,255,0.3); border-radius:8px; padding:10px 16px; margin-bottom:12px; font-size:13px; color:var(--accent);">
-  <span id="analysisBannerText">Hermes is re-analyzing assignments...</span>
-  <span style="display:inline-block; width:14px; height:14px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite; vertical-align:middle; margin-left:8px;"></span>
-</div>
 <style>
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 
 <script>
-let _syncPollTimer = null;
+let _reanalyzePollTimer = null;
 
 async function triggerSync() {
-  document.getElementById('syncBtn').textContent = 'Syncing...';
+  const btn = document.getElementById('syncBtn');
+  btn.textContent = 'Syncing...';
+  btn.disabled = true;
   await fetch('/api/sync', {method:'POST'});
-  setTimeout(() => { document.getElementById('syncBtn').textContent = 'Sync Canvas'; location.reload(); }, 5000);
+  setTimeout(() => { btn.textContent = 'Sync Canvas'; btn.disabled = false; location.reload(); }, 8000);
 }
 
 async function reanalyze() {
   if (!confirm('Clear all AI analysis and re-run? Takes about a minute.')) return;
-  document.getElementById('reanalyzeBtn').textContent = 'Reanalyzing...';
+  const btn = document.getElementById('reanalyzeBtn');
+  btn.textContent = 'Working...';
+  btn.disabled = true;
   await fetch('/api/reanalyze', {method:'POST'});
-  showSyncProgress();
-  startSyncPolling();
+  showReanalyzeStatus('Hermes is re-analyzing — this takes ~60s');
+  startReanalyzePoll();
 }
 
-function showSyncProgress() {
-  const prog = document.getElementById('syncProgress');
-  prog.style.display = 'block';
-  const bar = document.getElementById('syncProgressBar');
-  const text = document.getElementById('syncStatusText');
-  const banner = document.getElementById('analysisBanner');
-  banner.style.display = 'block';
-  // Animate bar to 80% over 60s
-  let pct = 0;
-  const interval = setInterval(() => {
-    pct = Math.min(pct + 1.5, 80);
-    bar.style.width = pct + '%';
-    text.textContent = 'Reanalyzing... ' + Math.round(pct) + '%';
-    if (pct >= 80) clearInterval(interval);
-  }, 1000);
-  prog._progressInterval = interval;
+function showReanalyzeStatus(msg) {
+  const el = document.getElementById('reanalyzeStatus');
+  el.style.display = 'flex';
+  document.getElementById('reanalyzeStatusText').textContent = msg;
 }
 
-function startSyncPolling() {
-  if (_syncPollTimer) clearInterval(_syncPollTimer);
-  _syncPollTimer = setInterval(async () => {
+function hideReanalyzeStatus() {
+  document.getElementById('reanalyzeStatus').style.display = 'none';
+}
+
+function startReanalyzePoll() {
+  if (_reanalyzePollTimer) clearInterval(_reanalyzePollTimer);
+  _reanalyzePollTimer = setInterval(async () => {
     try {
       const resp = await fetch('/api/sync-status');
       const data = await resp.json();
       if (data.status === 'done') {
-        clearInterval(_syncPollTimer);
-        _syncPollTimer = null;
-        const bar = document.getElementById('syncProgressBar');
-        bar.style.width = '100%';
-        document.getElementById('syncStatusText').textContent = 'Analysis complete!';
-        document.getElementById('analysisBannerText').textContent = 'Analysis complete — page will refresh.';
-        document.getElementById('reanalyzeBtn').textContent = 'Re-analyze All';
-        if (data.finished) {
-          const fin = new Date(data.finished);
-          document.getElementById('syncStatusText').textContent = 'Analysis complete at ' + fin.toLocaleTimeString();
-        }
-        setTimeout(() => location.reload(), 2000);
+        clearInterval(_reanalyzePollTimer);
+        _reanalyzePollTimer = null;
+        showReanalyzeStatus('Analysis complete — refreshing...');
+        setTimeout(() => location.reload(), 1500);
+      } else if (data.status === 'running' && data.started) {
+        const elapsed = Math.round((Date.now() - new Date(data.started).getTime()) / 1000);
+        showReanalyzeStatus(`Hermes is re-analyzing — ${elapsed}s elapsed`);
       }
     } catch(e) {}
-  }, 5000);
+  }, 4000);
 }
 
-// On load, check if analysis is already running
+// On load: resume polling if analysis is already in flight
 window.addEventListener('DOMContentLoaded', async () => {
   try {
     const resp = await fetch('/api/sync-status');
     const data = await resp.json();
     if (data.status === 'running') {
-      document.getElementById('analysisBanner').style.display = 'block';
-      document.getElementById('reanalyzeBtn').textContent = 'Reanalyzing...';
-      startSyncPolling();
+      document.getElementById('reanalyzeBtn').textContent = 'Working...';
+      document.getElementById('reanalyzeBtn').disabled = true;
+      showReanalyzeStatus('Hermes is re-analyzing — this takes ~60s');
+      startReanalyzePoll();
     }
   } catch(e) {}
 });
