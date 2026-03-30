@@ -116,11 +116,19 @@
 <!-- Daily Digest: what to do RIGHT NOW -->
 {% if daily_digest.overdue %}
 <div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
-  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">OVERDUE — Turn These In Now</div>
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">OVERDUE — Still Submittable</div>
+  <div style="font-size:11px; color:var(--muted); margin-bottom:10px;">Hermes checked each course's late policy. These may still earn points.</div>
   {% for a in daily_digest.overdue %}
-  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(248,113,113,0.2); font-size:13px;">
-    <a href="/assignments/{{ a.id }}" style="color:var(--red); text-decoration:none; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
-    <span style="color:var(--muted); font-size:11px; margin-left:8px; flex-shrink:0;">{{ a.course_name }}</span>
+  <div style="padding:6px 0; border-bottom:1px solid rgba(248,113,113,0.2);">
+    <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--red); text-decoration:none; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ a.course_name }}</span>
+    </div>
+    {% if a.late_reason %}
+    <div style="font-size:11px; color:{% if a.late_certain %}var(--yellow){% else %}var(--muted){% endif %}; margin-top:2px;">
+      {{ a.late_reason }}
+    </div>
+    {% endif %}
   </div>
   {% endfor %}
 </div>

@@ -70,6 +70,121 @@ def _fmt_start_by(start_by_str):
         return None
 
 
+_late_policy_cache = {}  # course_id -> (accepts: bool|None, reason: str)
+
+def _late_policy_for_course(course_id: str):
+    """Read the stored syllabus late_policy and return (accepts_late: bool|None, reason: str).
+
+    Returns:
+        True  — syllabus explicitly allows late submissions (may have penalty)
+        False — syllabus explicitly forbids late submissions
+        None  — policy unknown; defer to Canvas lock_at as the only signal
+    """
+    if course_id in _late_policy_cache:
+        return _late_policy_cache[course_id]
+
+    rules = {}
+    try:
+        syllabi = db.get_syllabus(str(course_id))
+        for s in syllabi:
+            try:
+                r = json.loads(s["rules_json"]) if s.get("rules_json") else {}
+                rules.update(r)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    policy_text = (rules.get("late_policy") or "").lower().strip()
+
+    NO_LATE_PHRASES = [
+        "no late", "not accepted", "will not be accepted", "not be accepted",
+        "0 credit", "zero credit", "no credit after", "no credit for late",
+        "cannot be submitted late", "no makeup", "no make-up",
+        "submissions will not", "will receive a 0", "receive a zero",
+        "no extensions", "not eligible for late", "strictly no late",
+    ]
+    YES_LATE_PHRASES = [
+        "% per day", "percent per day", "per day late", "late penalty",
+        "late submission", "accepted late", "accept late",
+        "within 24", "within 48", "within 72", "within one week",
+        "deduction per day", "deducted per day", "points off per day",
+        "late work accepted", "late work will be accepted",
+        "late with penalty", "submitted late for partial",
+        "up to one week late", "up to 1 week", "by end of week",
+        "through carmen", "by the end of the semester",
+    ]
+
+    result = None
+    reason = "No late policy found in syllabus."
+
+    if not policy_text or "not specified" in policy_text or policy_text in ("none", "n/a", "unknown"):
+        result = None
+        reason = "Late policy not specified in syllabus."
+    elif any(p in policy_text for p in NO_LATE_PHRASES):
+        result = False
+        reason = f"Syllabus: late work not accepted."
+    elif any(p in policy_text for p in YES_LATE_PHRASES):
+        result = True
+        reason = f"Syllabus allows late submission (may have penalty)."
+    else:
+        # Policy text exists but doesn't match either category clearly
+        result = None
+        reason = "Late policy unclear — cannot make a definitive call from syllabus."
+
+    _late_policy_cache[course_id] = (result, reason)
+    return result, reason
+
+
+def _assignment_still_submittable(a: dict, now: datetime) -> tuple:
+    """Determine if an overdue assignment can still earn points.
+
+    Returns (submittable: bool, reason: str).
+    Hermes makes the call — user should never need to check this themselves.
+    """
+    # 1. Non-submission types are never submittable
+    sub_types = (a.get("submission_types") or "").strip()
+    if sub_types in ("none", "not_graded", "on_paper"):
+        return False, "Not a digital submission — no action needed."
+
+    # 2. Canvas hard lock is the strongest signal
+    lock_at = a.get("lock_at")
+    if lock_at:
+        try:
+            lock_dt = _from_canvas_time(lock_at)
+            if lock_dt < now:
+                return False, f"Canvas closed submissions on {lock_dt.strftime('%b %d')}."
+        except Exception:
+            pass
+
+    # 3. Check syllabus late policy
+    cid = str(a.get("course_id", ""))
+    accepts_late, policy_reason = _late_policy_for_course(cid)
+    if accepts_late is False:
+        return False, policy_reason
+    if accepts_late is True:
+        return True, policy_reason
+
+    # 4. Heuristic: exams/midterms/finals are never resubmittable after the fact
+    title_lower = (a.get("title") or "").lower()
+    if any(kw in title_lower for kw in ("midterm", "final exam", "exam", "quiz")):
+        return False, "Exams cannot be retaken after the due date."
+
+    # 5. Policy unknown and no hard lock — flag as uncertain but potentially submittable
+    # Only flag if it's been less than 14 days since it was due (past that, almost certainly closed)
+    due_at = a.get("due_at")
+    if due_at:
+        try:
+            due_dt = _from_canvas_time(due_at)
+            days_overdue = (now - due_dt).days
+            if days_overdue > 14:
+                return False, "More than 2 weeks overdue — submission window almost certainly closed."
+        except Exception:
+            pass
+
+    return None, "Policy unclear — verify with instructor before attempting late submission."
+
+
 def _calc_priority_score(a: dict, now: datetime = None) -> float:
     """Calculate smarter priority score for sorting.
     priority_score = (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_penalty * hours_factor)
@@ -351,10 +466,8 @@ def dashboard():
     today_date = now.date()
     tomorrow_date = (now + timedelta(days=1)).date()
 
-    # Grab overdue assignments that can STILL be submitted for credit.
-    # Excluded if: submission window is closed (lock_at in the past),
-    # submission_types is 'none' (not a real submission), or the course
-    # is from a past term (term_name doesn't contain the current year/SP26).
+    # Overdue assignments: Hermes determines if each can still earn points.
+    # Uses Canvas lock_at, syllabus late policy, and assignment type heuristics.
     with db._connect() as _conn:
         overdue_rows = _conn.execute("""
             SELECT a.* FROM assignments a
@@ -362,25 +475,28 @@ def dashboard():
             WHERE a.due_at < datetime('now')
               AND a.status NOT IN ('submitted', 'complete')
               AND (c.is_ignored IS NULL OR c.is_ignored = 0)
-              AND (a.submission_types IS NULL
-                   OR a.submission_types = ''
-                   OR a.submission_types != 'none')
-              AND (a.lock_at IS NULL OR a.lock_at > datetime('now'))
             ORDER BY a.due_at ASC
         """).fetchall()
-    # Further filter: only include assignments from courses in the current term.
-    # Use course term_name if available; otherwise allow it through (don't filter blind).
-    def _is_current_term_assignment(row):
-        cid = str(row.get("course_id", ""))
+
+    overdue_asgns = []
+    for row in overdue_rows:
+        r = dict(row)
+        # Filter past-term courses: if term_name is stored and doesn't match current term
+        cid = str(r.get("course_id", ""))
         course_row = db.get_course_by_id(cid) if cid else None
         if course_row:
-            term = course_row.get("term_name", "") or ""
-            if term and "SP26" not in term and "Spring 2026" not in term and "2026" not in term:
-                return False
-        return True
+            term = (course_row.get("term_name") or "").strip()
+            if term and "2026" not in term:
+                continue  # past term — skip entirely
 
-    overdue_asgns = [_enrich_assignment(dict(r)) for r in overdue_rows
-                     if _is_current_term_assignment(dict(r))]
+        submittable, reason = _assignment_still_submittable(r, now)
+        if submittable is False:
+            continue  # Hermes has determined this cannot earn points
+
+        enriched = _enrich_assignment(r)
+        enriched["late_reason"] = reason  # explain to user what Hermes determined
+        enriched["late_certain"] = submittable is True  # True=confirmed open, None=uncertain
+        overdue_asgns.append(enriched)
 
     dd_due_today = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == today_date]
     dd_due_tomorrow = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == tomorrow_date]
@@ -1663,28 +1779,20 @@ def alerts_page():
 
     alerts = []
 
-    # Overdue items — only ones where submission is still open
+    # Overdue items — Hermes determines if each can still earn points
     for a in assignments:
         if not (a.get("due_dt") and (a["due_dt"] - now).total_seconds() < 0):
             continue
         if a.get("status") in ("submitted", "complete"):
             continue
-        # Skip if Canvas has closed the submission window
-        lock_at = a.get("lock_at")
-        if lock_at:
-            try:
-                lock_dt = _from_canvas_time(lock_at)
-                if lock_dt < now:
-                    continue  # window closed — nothing to do
-            except Exception:
-                pass
-        # Skip non-submittable types
-        if a.get("submission_types") in ("none", "not_graded"):
-            continue
+        submittable, late_reason = _assignment_still_submittable(a, now)
+        if submittable is False:
+            continue  # can't earn points — don't show it
+        title = "Overdue — Submit Now" if submittable is True else "Overdue — Policy Unclear"
         alerts.append({
             "level": "danger", "icon": "overdue",
-            "title": "Overdue — Still Submittable",
-            "message": f"{a['title']} ({a.get('course_name','')}) was due {a['due_fmt']} — check if late submission is accepted.",
+            "title": title,
+            "message": f"{a['title']} ({a.get('course_name','')}) was due {a['due_fmt']}. {late_reason}",
             "assignment_id": a["id"],
         })
 
