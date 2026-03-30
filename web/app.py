@@ -87,6 +87,10 @@ def _enrich_assignment(a: dict) -> dict:
         except Exception:
             pass
 
+    wl = _workload_label(a.get("estimated_hours"))
+    a["workload_label"] = wl[0] if wl else None
+    a["workload_color"] = wl[1] if wl else "var(--muted)"
+
     return a
 
 
@@ -393,7 +397,72 @@ def calendar_page():
             })
         weeks.append({"days": week, "week_total_hours": round(week_total_hours, 1)})
 
-    return render_template("calendar.html", weeks=weeks)
+    week_synthesis = db.get_pref("week_synthesis") or ""
+    return render_template("calendar.html", weeks=weeks, week_synthesis=week_synthesis)
+
+
+_STOP_WORDS = {'the','a','an','and','or','for','to','in','of','with','on','at','by','from',
+               'this','is','are','was','be','as','it','its','into','use','using','your'}
+
+def _relevant_course_materials(assignment_title: str, syllabi: list) -> list:
+    """Return course materials relevant to this assignment, with content snippets.
+
+    Always includes the syllabus. Other files are scored by keyword overlap with
+    the assignment title — only files with at least one matching keyword are shown.
+    """
+    import re as _re
+    title_words = {w.lower() for w in _re.split(r'\W+', assignment_title)
+                   if len(w) >= 3 and w.lower() not in _STOP_WORDS}
+
+    non_syl = []  # (score, entry) for non-syllabus files
+    syllabus_entries = []
+
+    for s in syllabi:
+        fname = s.get("file_name", "")
+        if not fname:
+            continue
+        content = s.get("content") or ""
+        snippet = content[:300].strip()
+
+        if fname == "__canvas_syllabus_page__":
+            syllabus_entries.append({"label": "Canvas Syllabus Page", "kind": "syllabus",
+                                     "score": 0, "snippet": snippet, "chars": len(content)})
+        elif fname.startswith("__page__"):
+            page_id = fname[8:]
+            text = (page_id + " " + content[:500]).lower()
+            score = sum(1 for w in title_words if w in text)
+            if score > 0:
+                non_syl.append((score, {"label": page_id, "kind": "page",
+                                        "score": score, "snippet": snippet, "chars": len(content)}))
+        elif fname.startswith("__piazza__"):
+            # Piazza posts: match subject against title words
+            text = content[:500].lower()
+            score = sum(1 for w in title_words if w in text)
+            if score > 0:
+                non_syl.append((score, {"label": f"Piazza: {content[:60].strip()}", "kind": "page",
+                                        "score": score, "snippet": snippet, "chars": len(content)}))
+        else:
+            from modules.canvas_client import is_syllabus_file as _is_syl
+            if _is_syl(fname):
+                syllabus_entries.append({"label": fname, "kind": "syllabus",
+                                         "score": 0, "snippet": snippet, "chars": len(content)})
+            else:
+                fname_lower = fname.lower()
+                score = sum(1 for w in title_words if w in fname_lower)
+                if score > 0:
+                    non_syl.append((score, {"label": fname, "kind": "file",
+                                            "score": score, "snippet": snippet, "chars": len(content)}))
+
+    # Only show files whose score equals the maximum score found
+    # (i.e. the best-matching files only — no partial matches when better ones exist)
+    if non_syl:
+        max_score = max(s for s, _ in non_syl)
+        # Require score == max_score, capped at 5 files
+        best = [e for s, e in sorted(non_syl, key=lambda x: -x[0]) if s == max_score][:5]
+    else:
+        best = []
+
+    return syllabus_entries + best
 
 
 @app.route("/assignments/<assignment_id>")
@@ -432,6 +501,47 @@ def assignment_detail(assignment_id):
     # Flag if Canvas gave us a useless description so the UI can show a note
     description_inferred = _is_boilerplate_description(a.get("description", ""))
 
+    # Ingested course materials — show only ones relevant to this assignment
+    course_materials = []
+    syllabi = db.get_syllabus(str(a.get("course_id", "")))
+    course_materials = _relevant_course_materials(a.get("title", ""), syllabi)
+
+    # task_sections and course_weight_context from analysis
+    task_sections = []
+    course_weight_context = ""
+    if a.get("analysis_json"):
+        try:
+            analysis_extra = json.loads(a["analysis_json"])
+            task_sections = analysis_extra.get("task_sections") or []
+            course_weight_context = analysis_extra.get("course_weight_context") or ""
+        except Exception:
+            pass
+
+    # Procrastination scenarios
+    schedule_scenarios = None
+    est_hours = a.get("estimated_hours")
+    due_at_str = a.get("due_at")
+    if est_hours and est_hours >= 1.0 and due_at_str and a.get("status") not in ("submitted", "complete"):
+        try:
+            due_dt = _from_canvas_time(due_at_str)
+            now = datetime.now()
+            days_left = max((due_dt - now).total_seconds() / 86400, 0)
+            if 0.1 < days_left <= 14:
+                # Scenario A: start tonight
+                nights_available = max(int(days_left), 1)
+                hrs_per_night_a = round(est_hours / nights_available, 1)
+                # Scenario B: start the day before
+                if days_left > 1.5:
+                    hrs_one_night = round(est_hours, 1)
+                    schedule_scenarios = {
+                        "start_now": {"days": nights_available, "hrs_per_day": hrs_per_night_a},
+                        "wait": {"hrs_total": hrs_one_night, "days_away": int(days_left)},
+                        "feasible_now": hrs_per_night_a <= 4,
+                        "feasible_wait": hrs_one_night <= 5,
+                    }
+        except Exception:
+            pass
+
     return render_template(
         "assignment_detail.html",
         a=a,
@@ -446,6 +556,10 @@ def assignment_detail(assignment_id):
         time_spent=time_spent,
         grade_obj=grade_obj,
         description_inferred=description_inferred,
+        course_materials=course_materials,
+        task_sections=task_sections,
+        course_weight_context=course_weight_context,
+        schedule_scenarios=schedule_scenarios,
     )
 
 
@@ -471,6 +585,33 @@ def exams_page():
     exams_raw = db.get_upcoming_exams(days_ahead=90)
     exams = [_enrich_exam(e) for e in exams_raw]
     return render_template("exams.html", exams=exams)
+
+
+@app.route("/exams/<exam_id>")
+def exam_detail(exam_id):
+    e = db.get_exam_by_id(exam_id)
+    if not e:
+        return "Exam not found", 404
+    e = _enrich_exam(dict(e))
+
+    study_tips = e.get("study_tips", [])
+    reasoning = ""
+    if e.get("analysis_json"):
+        try:
+            analysis = json.loads(e["analysis_json"])
+            reasoning = analysis.get("reasoning", "")
+            study_tips = analysis.get("study_tips", study_tips)
+        except Exception:
+            pass
+
+    course_notes = db.get_course_notes(str(e.get("course_id", "")))
+
+    return render_template("exam_detail.html",
+        e=e,
+        reasoning=reasoning,
+        study_tips=study_tips,
+        course_notes=course_notes,
+    )
 
 
 @app.route("/courses")
@@ -694,6 +835,42 @@ def trigger_sync():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/assignment/<assignment_id>/reanalyze", methods=["POST"])
+def reanalyze_assignment(assignment_id):
+    """Force re-analyze a single assignment using current course materials. Does NOT full sync."""
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority=NULL WHERE id=?",
+        (assignment_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    def _targeted_reanalyze():
+        a = db.get_assignment_by_id(assignment_id)
+        if not a:
+            return
+        a = dict(a)
+        sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+        try:
+            import hermes as h
+            from modules import analyzer
+            cid = str(a.get("course_id", ""))
+            rules_map = {cid: h._get_syllabus_rules(cid)}
+            materials_map = {cid: h._get_course_materials(cid)}
+            notes_map = {cid: db.get_course_notes(cid)}
+            results = analyzer.analyze_assignments_batch([a], rules_map, materials_map, notes_map)
+            if results and not results[0].get("_rate_limited"):
+                db.store_analysis(a["id"], results[0])
+                logger.info(f"Single re-analysis complete: {a['title']}")
+        except Exception as e:
+            logger.error(f"Single re-analysis failed for {assignment_id}: {e}")
+
+    import threading
+    threading.Thread(target=_targeted_reanalyze, daemon=True).start()
+    return jsonify({"status": "re-analysis queued"})
+
+
 @app.route("/api/reanalyze", methods=["POST"])
 def reanalyze_all():
     """Clear all analysis and re-run. Use when Gemini was misbehaving."""
@@ -716,6 +893,22 @@ def reanalyze_all():
 
 
 # ─── Grades ───────────────────────────────────────────────────────────────────
+
+def _workload_label(hours):
+    """Derive a workload category label from estimated hours."""
+    if hours is None:
+        return None
+    if hours < 1:
+        return ("quick", "var(--green)")
+    elif hours < 3:
+        return ("moderate", "var(--text)")
+    elif hours < 6:
+        return ("heavy", "var(--yellow)")
+    elif hours < 12:
+        return ("major", "var(--orange)")
+    else:
+        return ("week-eater", "var(--red)")
+
 
 def _letter_grade(pct):
     if pct is None:
@@ -753,43 +946,67 @@ def grades_page():
                 "graded_count": 0, "current_avg": None, "letter": "?",
                 "color": "muted", "target": db.get_grade_goal(cid),
                 "grades": [], "on_track": None,
-                "needed_on_final": None, "final_weight_pct": 30,
+                "needed_on_final": None, "final_weight_pct": 0,
+                "category_grades": [],
             })
             continue
 
         valid_pcts = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
         current_avg = round(sum(valid_pcts) / len(valid_pcts), 1) if valid_pcts else None
         target = db.get_grade_goal(cid)
-        on_track = (current_avg >= target) if current_avg is not None else None
-
-        # "What do I need on the final?" calc
-        # We need: target = (current_avg * weight_so_far + final_score * final_weight) / 100
-        # Simplified: assume final exam is 30% if no syllabus data
-        syllabi = db.get_syllabus(cid)
-        final_weight = 0.30
-        for s in syllabi:
-            try:
-                rules = json.loads(s["rules_json"]) if s.get("rules_json") else {}
-                gw = rules.get("grading_weights", {})
-                for k, v in gw.items():
-                    if "final" in k.lower() or "exam" in k.lower():
-                        try:
-                            final_weight = float(str(v).replace("%", "")) / 100
-                        except Exception:
-                            pass
-                        break
-            except Exception:
-                pass
-
-        current_weight = 1.0 - final_weight
-        if current_avg is not None and final_weight > 0:
-            needed_on_final = (target - current_avg * current_weight) / final_weight
-        else:
-            needed_on_final = None
 
         # Prefer Canvas overall grade if available
         canvas_grade = c.get("canvas_grade_pct")
         display_avg = canvas_grade if canvas_grade is not None else current_avg
+
+        # Get assignment groups for this course
+        groups = db.get_assignment_groups(cid)
+        group_map = {g["canvas_group_id"]: g for g in groups}
+
+        # Calculate per-group grades
+        category_grades = []
+        final_group = None
+        final_weight = None
+
+        for g in groups:
+            if g["weight"] <= 0:
+                continue
+            # Get assignments in this group
+            group_assignments = [a for a in db.get_all_assignments_for_course(cid)
+                                if a.get("canvas_group_id") == g["canvas_group_id"]]
+            group_assignment_ids = {a["id"] for a in group_assignments}
+            # Get grades for those assignments
+            graded = [gr for gr in course_grades if gr.get("assignment_id") in group_assignment_ids and gr.get("grade_pct") is not None]
+
+            group_avg = round(sum(g2["grade_pct"] for g2 in graded) / len(graded), 1) if graded else None
+
+            gname_lower = g["name"].lower()
+            is_final = "final exam" in gname_lower or (gname_lower == "final")
+            has_ungraded = len(group_assignments) > len(graded)
+
+            category_grades.append({
+                "name": g["name"],
+                "weight": g["weight"],
+                "current_pct": group_avg,
+                "graded_count": len(graded),
+                "total_count": len(group_assignments),
+                "is_final": is_final,
+            })
+
+            if is_final and has_ungraded:
+                final_group = g["name"]
+                final_weight = g["weight"] / 100.0
+
+        if final_weight and display_avg is not None and final_weight > 0:
+            current_weight = 1.0 - final_weight
+            needed_on_final = round((target - display_avg * current_weight) / final_weight, 1)
+            needed_on_final = min(needed_on_final, 200)  # cap at 200% to avoid absurd numbers
+        else:
+            needed_on_final = None
+            final_weight = 0
+
+        # AI-suggested target
+        ai_suggestion = db.get_grade_target_suggestion(cid)
 
         course_summaries.append({
             "id": cid, "name": c["name"], "code": c.get("code", ""),
@@ -800,9 +1017,12 @@ def grades_page():
             "color": _grade_color(display_avg),
             "target": target,
             "on_track": (display_avg >= target) if display_avg is not None else None,
-            "needed_on_final": round(needed_on_final, 1) if needed_on_final is not None else None,
-            "final_weight_pct": round(final_weight * 100),
+            "needed_on_final": needed_on_final,
+            "final_weight_pct": round(final_weight * 100) if final_weight else 0,
             "grades": course_grades[:5],
+            "ai_suggested_target": ai_suggestion.get("target") if ai_suggestion else None,
+            "ai_target_reasoning": ai_suggestion.get("reasoning") if ai_suggestion else None,
+            "category_grades": category_grades,
         })
 
     return render_template("grades.html",
@@ -1067,6 +1287,120 @@ def log_time(assignment_id):
     return jsonify({"status": "ok", "total_minutes": total})
 
 
+
+
+@app.route("/roi")
+def roi_page():
+    """Return on Investment — grade recovery and extra credit opportunities."""
+    # Build group weight lookup: {(course_id, canvas_group_id): weight}
+    courses = db.get_courses()
+    group_weights = {}  # (course_id, canvas_group_id) -> weight
+    for c in courses:
+        for g in db.get_assignment_groups(c["id"]):
+            group_weights[(str(c["id"]), g["canvas_group_id"])] = g["weight"]
+
+    # --- Resubmission opportunities ---
+    resubs = db.get_resubmittable_assignments()
+    resub_ops = []
+    for r in resubs:
+        cid = str(r["course_id"])
+        gid = r["canvas_group_id"]
+        group_weight = group_weights.get((cid, gid), 0.0)
+        total_pts = db.get_group_total_points(cid, gid) if gid else 0
+        points_possible = r.get("points_possible") or 0
+        current_pct = r.get("grade_pct") or 0
+        points_earned = r.get("points_earned") or 0
+        potential_gain_pts = points_possible - points_earned  # max possible gain
+        if total_pts > 0 and group_weight > 0:
+            grade_impact = round((potential_gain_pts / total_pts) * group_weight, 2)
+        else:
+            grade_impact = None
+
+        analysis = {}
+        try:
+            analysis = json.loads(r["analysis_json"]) if r.get("analysis_json") else {}
+        except Exception:
+            pass
+
+        resub_ops.append({
+            "id": r["id"],
+            "title": r["title"],
+            "course_name": r["course_name"],
+            "current_pct": round(current_pct, 1),
+            "points_earned": round(points_earned, 1),
+            "points_possible": points_possible,
+            "grade_impact": grade_impact,
+            "html_url": r.get("html_url"),
+            "resubmit_details": analysis.get("resubmit_details", ""),
+        })
+    resub_ops.sort(key=lambda x: x.get("grade_impact") or 0, reverse=True)
+
+    # --- Extra credit opportunities ---
+    ec_raw = db.get_extra_credit_assignments()
+    ec_ops = []
+    for r in ec_raw:
+        cid = str(r["course_id"])
+        gid = r["canvas_group_id"]
+        group_weight = group_weights.get((cid, gid), 0.0)
+        total_pts = db.get_group_total_points(cid, gid) if gid else 0
+        points_possible = r.get("points_possible") or 0
+        if total_pts > 0 and group_weight > 0:
+            grade_impact = round((points_possible / total_pts) * group_weight, 2)
+        else:
+            grade_impact = None
+
+        due_fmt, _, due_class = _fmt_due(r.get("due_at"))
+        est_hours = r.get("estimated_hours")
+        ec_ops.append({
+            "id": r["id"],
+            "title": r["title"],
+            "course_name": r["course_name"],
+            "points_possible": points_possible,
+            "grade_impact": grade_impact,
+            "due_fmt": due_fmt,
+            "due_class": due_class,
+            "est_hours": est_hours,
+            "html_url": r.get("html_url"),
+        })
+    ec_ops.sort(key=lambda x: x.get("grade_impact") or 0, reverse=True)
+
+    # --- Low-weight assignments to consider skipping ---
+    # Assignments worth <1% of final grade, unsubmitted, due >3 days away
+    skip_candidates = []
+    all_upcoming = db.get_upcoming_assignments(days_ahead=30)
+    for a in all_upcoming:
+        if a.get("status") in ("submitted", "complete"):
+            continue
+        cid = str(a.get("course_id", ""))
+        gid = a.get("canvas_group_id")
+        group_weight = group_weights.get((cid, gid), 0.0)
+        total_pts = db.get_group_total_points(cid, gid) if gid else 0
+        pts = a.get("points_possible") or 0
+        if total_pts > 0 and group_weight > 0 and pts > 0:
+            grade_impact = round((pts / total_pts) * group_weight, 2)
+            est_hours = a.get("estimated_hours") or 0
+            # Flag if impact < 1% of final grade but would take >1h
+            if grade_impact < 1.0 and est_hours > 1.0:
+                due_fmt, _, due_class = _fmt_due(a.get("due_at"))
+                skip_candidates.append({
+                    "id": a["id"],
+                    "title": a["title"],
+                    "course_name": a.get("course_name", ""),
+                    "grade_impact": grade_impact,
+                    "est_hours": est_hours,
+                    "due_fmt": due_fmt,
+                    "due_class": due_class,
+                    "ratio": round(grade_impact / est_hours, 3) if est_hours > 0 else 0,
+                })
+    # Sort by worst ratio (most hours for least grade impact)
+    skip_candidates.sort(key=lambda x: x["ratio"])
+    skip_candidates = skip_candidates[:8]
+
+    return render_template("roi.html",
+        resub_ops=resub_ops,
+        ec_ops=ec_ops,
+        skip_candidates=skip_candidates,
+    )
 
 
 def run(port=5000, debug=False, use_reloader=True):
