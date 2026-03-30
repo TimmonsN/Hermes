@@ -128,6 +128,13 @@
     <option value="difficulty">Sort: Difficulty</option>
     <option value="hours">Sort: Est. Hours</option>
     <option value="priority">Sort: Priority</option>
+    <option value="impact">Sort: Grade Impact</option>
+  </select>
+  <select class="filter-select" id="impactFilter" onchange="applyFilters()">
+    <option value="">All Impact Tiers</option>
+    <option value="high">High Impact (&gt;2%)</option>
+    <option value="medium">Medium Impact (1-2%)</option>
+    <option value="low">Low Impact (&lt;1%)</option>
   </select>
   <div class="filter-stats" id="filterCount"></div>
 </div>
@@ -157,6 +164,7 @@
         <th>Priority</th>
         <th>Difficulty</th>
         <th>Est. Time</th>
+        <th>Grade Impact</th>
         <th>Start By</th>
         <th>Progress</th>
         <th>Flags</th>
@@ -176,6 +184,8 @@
           data-difficulty="{{ a.difficulty or 0 }}"
           data-hours="{{ a.estimated_hours or 0 }}"
           data-due="{{ a.due_at or '' }}"
+          data-impact="{{ a.grade_impact_pct or 0 }}"
+          data-impact-tier="{{ a.impact_tier or 'unknown' }}"
           style="{% if is_done %}opacity:0.55;{% elif is_overdue %}border-left:3px solid var(--red);{% endif %}">
         <td>
           <input type="checkbox" class="row-check assignment-check" value="{{ a.id }}"
@@ -198,6 +208,14 @@
           {% else %}—{% endif %}
         </td>
         <td style="color:var(--muted);">{% if a.estimated_hours %}~{{ a.estimated_hours }}h{% else %}—{% endif %}</td>
+        <td style="font-size:12px; white-space:nowrap;">
+          {% if a.grade_impact_pct is not none %}
+            <span style="font-weight:600; color:{% if a.impact_tier == 'high' %}var(--red){% elif a.impact_tier == 'medium' %}var(--yellow){% else %}var(--muted){% endif %};"
+                  title="{{ a.impact_tier | title }} impact — {{ a.grade_impact_pct }}% of final grade">
+              {{ a.grade_impact_pct }}%
+            </span>
+          {% else %}—{% endif %}
+        </td>
         <td style="color:var(--accent); font-size:12px;">{{ a.start_by_fmt or '—' }}</td>
         <td>
           {% if a.checklist_stats is defined and a.checklist_stats.total > 0 %}
@@ -241,6 +259,7 @@ function applyFilters() {
   const priority = document.getElementById('priorityFilter').value;
   const completion = document.getElementById('completionFilter').value; // 'todo', 'done', or ''
   const sortBy = document.getElementById('sortSelect').value;
+  const impactFilter = document.getElementById('impactFilter').value;
 
   const tbody = document.getElementById('assignmentsBody');
   const rows = Array.from(tbody.querySelectorAll('tr'));
@@ -251,13 +270,15 @@ function applyFilters() {
     const rowCourse = row.dataset.course || '';
     const rowPriority = row.dataset.priority || '';
     const rowDone = row.dataset.done || 'todo';
+    const rowImpactTier = row.dataset.impactTier || '';
 
     const matchSearch = !search || title.includes(search) || rowCourse.includes(search);
     const matchCourse = !course || rowCourse.includes(course);
     const matchPriority = !priority || rowPriority === priority;
     const matchCompletion = !completion || rowDone === completion;
+    const matchImpact = !impactFilter || rowImpactTier === impactFilter;
 
-    if (matchSearch && matchCourse && matchPriority && matchCompletion) {
+    if (matchSearch && matchCourse && matchPriority && matchCompletion && matchImpact) {
       row.style.display = '';
       visible.push(row);
     } else {
@@ -275,6 +296,8 @@ function applyFilters() {
       return parseFloat(b.dataset.hours) - parseFloat(a.dataset.hours);
     } else if (sortBy === 'priority') {
       return (priorityOrder[a.dataset.priority] || 2) - (priorityOrder[b.dataset.priority] || 2);
+    } else if (sortBy === 'impact') {
+      return parseFloat(b.dataset.impact || 0) - parseFloat(a.dataset.impact || 0);
     }
     return 0;
   });

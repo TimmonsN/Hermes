@@ -221,15 +221,23 @@ def _assignment_still_submittable(a: dict, now: datetime) -> tuple:
     return None, "Late policy not found in syllabus — submission window may still be open."
 
 
-def _calc_priority_score(a: dict, now: datetime = None) -> float:
+def _calc_priority_score(a: dict, now: datetime = None,
+                         exam_courses: set = None,
+                         underperforming_groups: set = None) -> float:
     """Calculate smarter priority score for sorting.
-    priority_score = (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_penalty * hours_factor)
+
+    priority_score = urgency + grade_impact + effort_signal + exam_proximity_boost + underperform_boost
+
+    exam_courses: set of course_ids that have an exam in <5 days
+    underperforming_groups: set of (course_id, canvas_group_id) tuples where avg < 75%
     """
     if now is None:
         now = datetime.now()
+
     # days_factor: peaks at due date (1.0), drops to 0 at 14+ days out
     due_at = a.get("due_at")
     days_factor = 0.5
+    days_until = 99.0
     if due_at:
         try:
             due_dt = _from_canvas_time(due_at)
@@ -250,16 +258,31 @@ def _calc_priority_score(a: dict, now: datetime = None) -> float:
     impact_weight = 0.35
     effort_weight = 0.15
 
-    return (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_weight * hours_factor)
+    score = (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_weight * hours_factor)
+
+    # Exam proximity boost: if this course has an exam in <5 days, boost by up to 0.25
+    # (assignments become exam prep — get them done ASAP)
+    if exam_courses and a.get("course_id") and str(a["course_id"]) in exam_courses:
+        score += 0.25
+
+    # Underperforming category boost: if Niko is struggling in this assignment's category,
+    # boost priority so he focuses on shoring up weak areas
+    if underperforming_groups and a.get("course_id") and a.get("canvas_group_id"):
+        key = (str(a["course_id"]), a["canvas_group_id"])
+        if key in underperforming_groups:
+            score += 0.15
+
+    return score
 
 
-def _enrich_assignment(a: dict) -> dict:
+def _enrich_assignment(a: dict, exam_courses: set = None, underperforming_groups: set = None) -> dict:
     due_dt, due_fmt, due_class = _fmt_due(a.get("due_at"))
     a["due_fmt"] = due_fmt
     a["due_class"] = due_class
     a["due_dt"] = due_dt
     a["start_by_fmt"] = _fmt_start_by(a.get("start_by"))
-    a["priority_score"] = _calc_priority_score(a)
+    a["priority_score"] = _calc_priority_score(a, exam_courses=exam_courses,
+                                                underperforming_groups=underperforming_groups)
 
     # Parse analysis_json for extra fields
     if a.get("analysis_json"):
@@ -311,10 +334,42 @@ def dashboard():
         greeting = "evening"
 
     assignments_raw = db.get_upcoming_assignments(days_ahead=60)
-    assignments = [_enrich_assignment(a) for a in assignments_raw]
     exams_raw = db.get_upcoming_exams(days_ahead=60)
     exams = [_enrich_exam(e) for e in exams_raw]
     courses = db.get_courses()
+
+    # Pre-compute exam proximity and underperforming groups for smarter priority scoring
+    exam_courses = set()
+    for e in exams_raw:
+        if e.get("start_at") and e.get("course_id"):
+            try:
+                exam_dt = _from_canvas_time(e["start_at"])
+                if 0 <= (exam_dt - now).days <= 5:
+                    exam_courses.add(str(e["course_id"]))
+            except Exception:
+                pass
+
+    underperforming_groups = set()
+    try:
+        all_grades_for_boost = db.get_all_grades()
+        for c in courses:
+            cid = str(c["id"])
+            groups = db.get_assignment_groups(cid)
+            all_crs_asgns = db.get_all_assignments_for_course(cid)
+            crs_grades = [g for g in all_grades_for_boost if str(g.get("course_id")) == cid]
+            for grp in groups:
+                gid = grp["canvas_group_id"]
+                grp_ids = {a["id"] for a in all_crs_asgns if a.get("canvas_group_id") == gid}
+                grp_grades = [g["grade_pct"] for g in crs_grades
+                              if g.get("assignment_id") in grp_ids and g.get("grade_pct") is not None]
+                if grp_grades and sum(grp_grades) / len(grp_grades) < 75.0:
+                    underperforming_groups.add((cid, gid))
+    except Exception:
+        pass
+
+    assignments = [_enrich_assignment(a, exam_courses=exam_courses,
+                                      underperforming_groups=underperforming_groups)
+                   for a in assignments_raw]
 
     due_today, this_week, coming_up = [], [], []
     for a in assignments:
@@ -498,6 +553,48 @@ def dashboard():
 
     week_synthesis = db.get_pref("week_synthesis") or ""
 
+    # --- 2-Week Workload Heat Calendar ---
+    heat_calendar = []
+    for i in range(14):
+        day_date = (now + timedelta(days=i)).date()
+        day_assignments = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == day_date]
+        # Safe exam date extraction
+        _day_exams = []
+        for e in exams:
+            if e.get("start_at"):
+                try:
+                    if _from_canvas_time(e["start_at"]).date() == day_date:
+                        _day_exams.append(e)
+                except Exception:
+                    pass
+        total_hours = round(sum(a.get("estimated_hours") or 0 for a in day_assignments), 1)
+        exam_on_day = len(_day_exams) > 0
+        # Heat level: none / light / moderate / heavy / critical
+        if exam_on_day:
+            heat = "critical"
+        elif total_hours == 0:
+            heat = "none"
+        elif total_hours < 2:
+            heat = "light"
+        elif total_hours < 4:
+            heat = "moderate"
+        elif total_hours < 7:
+            heat = "heavy"
+        else:
+            heat = "critical"
+        heat_calendar.append({
+            "date": day_date.isoformat(),
+            "label": day_date.strftime("%-d"),
+            "weekday": day_date.strftime("%a"),
+            "total_hours": total_hours,
+            "count": len(day_assignments),
+            "exam": exam_on_day,
+            "heat": heat,
+            "is_today": i == 0,
+            "assignments": [{"id": a["id"], "title": a["title"][:40]} for a in day_assignments[:5]],
+            "exams": [{"id": e["id"], "title": e["title"][:40]} for e in _day_exams],
+        })
+
     # --- Tonight's Study Session Plan ---
     TONIGHT_HOURS = 3.0
     session_plan = []
@@ -625,6 +722,33 @@ def dashboard():
         if snap.get("on_track") is False and snap.get("current_avg") is not None:
             dd_grade_warnings.append(snap)
 
+    # "You're Done For Today" detection
+    # True only if there were assignments due today and ALL are submitted/complete
+    today_due_raw = [a for a in assignments_raw if a.get("due_at")]
+    today_due_any = False
+    all_done_today = False
+    try:
+        with db._connect() as _td_conn:
+            today_due_rows = _td_conn.execute("""
+                SELECT a.status FROM assignments a
+                LEFT JOIN courses c ON c.id = a.course_id
+                WHERE date(a.due_at) = date('now')
+                  AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+            """).fetchall()
+        if today_due_rows:
+            today_due_any = True
+            all_done_today = all(r["status"] in ("submitted", "complete") for r in today_due_rows)
+    except Exception:
+        pass
+
+    # Recent unread announcements for inbox strip on dashboard (top 3)
+    inbox_announcements = []
+    try:
+        _all_anns = db.get_announcements(limit=10)
+        inbox_announcements = [a for a in _all_anns if not a.get("is_read")][:3]
+    except Exception:
+        pass
+
     daily_digest = {
         "due_today": dd_due_today,
         "due_tomorrow": dd_due_tomorrow,
@@ -658,6 +782,10 @@ def dashboard():
         top_action=top_action,
         grade_recovery=grade_recovery,
         session_plan=session_plan,
+        all_done_today=all_done_today,
+        today_due_any=today_due_any,
+        inbox_announcements=inbox_announcements,
+        heat_calendar=heat_calendar,
     )
 
 
@@ -1136,6 +1264,46 @@ def assignments_page():
         checklist_stats_map = {}
     for a in assignments:
         a["checklist_stats"] = checklist_stats_map.get(a["id"], {"total": 0, "done": 0, "pct": 0})
+
+    # Compute grade_impact_pct for every assignment so we can sort/display by impact
+    # Batch-fetch all assignment groups to avoid N+1 queries
+    _all_groups_cache = {}  # course_id -> list of groups
+    _group_total_pts_cache = {}  # (course_id, canvas_group_id) -> total_pts
+    for a in all_enriched:
+        cid = str(a.get("course_id", ""))
+        gid = a.get("canvas_group_id")
+        if not cid or not gid:
+            a["grade_impact_pct"] = None
+            a["impact_tier"] = "unknown"
+            continue
+        if cid not in _all_groups_cache:
+            try:
+                _all_groups_cache[cid] = db.get_assignment_groups(cid)
+            except Exception:
+                _all_groups_cache[cid] = []
+        groups_for_a = _all_groups_cache[cid]
+        grp = next((g for g in groups_for_a if g["canvas_group_id"] == gid), None)
+        if grp and grp.get("weight", 0) > 0 and a.get("points_possible"):
+            cache_key = (cid, gid)
+            if cache_key not in _group_total_pts_cache:
+                try:
+                    _group_total_pts_cache[cache_key] = db.get_group_total_points(cid, gid)
+                except Exception:
+                    _group_total_pts_cache[cache_key] = 0
+            group_total = _group_total_pts_cache[cache_key]
+            if group_total > 0:
+                impact = round((a["points_possible"] / group_total) * (grp["weight"] / 100) * 100, 2)
+                a["grade_impact_pct"] = impact
+                # Tier: High (>2%), Medium (1-2%), Low (<1%)
+                if impact >= 2.0:
+                    a["impact_tier"] = "high"
+                elif impact >= 1.0:
+                    a["impact_tier"] = "medium"
+                else:
+                    a["impact_tier"] = "low"
+                continue
+        a["grade_impact_pct"] = None
+        a["impact_tier"] = "unknown"
 
     courses = db.get_courses()
     course_names = sorted(set(a["course_name"] for a in all_enriched if a.get("course_name")))
@@ -1781,6 +1949,9 @@ def grades_page():
                 "projected_realistic": None, "trend": "stable",
                 "trend_color": "muted", "trend_icon": "→",
                 "ai_suggested_target": None, "ai_target_reasoning": None,
+                "patterns": [],
+                "health_score": 50, "health_color": "muted", "health_label": "No data",
+                "submitted_count": 0, "total_asgn_count": 0,
             })
             continue
 
@@ -1972,6 +2143,44 @@ def grades_page():
                         f"You're strong in {cat['name']} ({cat['current_pct']:.0f}%) — keep it up."
                     )
 
+        # --- Course Health Score ---
+        # Combines: on_track (vs target), trend, days_until_final, assignments_remaining
+        # Result: "green" | "yellow" | "red" with a numeric score 0-100
+        health_score = 50  # default neutral
+        health_color = "yellow"
+        health_label = "Needs attention"
+        if display_avg is not None:
+            # Base: how far above/below target
+            gap = display_avg - target
+            health_score = min(100, max(0, 50 + gap * 1.5))
+            # Trend modifier
+            if trend == "up":
+                health_score = min(100, health_score + 10)
+            elif trend == "down":
+                health_score = max(0, health_score - 15)
+            # Final exam proximity: if final is near and score is borderline, penalize
+            if needed_on_final is not None and needed_on_final > 85:
+                health_score = max(0, health_score - 10)
+            # Grade tiers
+            if health_score >= 70:
+                health_color = "green"
+                health_label = "On track"
+            elif health_score >= 45:
+                health_color = "yellow"
+                health_label = "Needs attention"
+            else:
+                health_color = "red"
+                health_label = "At risk"
+        elif display_avg is None:
+            health_color = "muted"
+            health_label = "No data"
+
+        # --- Assignment completion rate ---
+        total_course_asgns = len(all_course_assignments)
+        graded_asgn_ids = {g.get("assignment_id") for g in course_grades}
+        submitted_count = sum(1 for a in all_course_assignments
+                              if a["id"] in graded_asgn_ids)
+
         course_summaries.append({
             "id": cid, "name": c["name"], "code": c.get("code", ""),
             "graded_count": len(course_grades),
@@ -1993,6 +2202,11 @@ def grades_page():
             "trend_color": trend_color,
             "trend_icon": trend_icon,
             "patterns": patterns,
+            "health_score": round(health_score),
+            "health_color": health_color,
+            "health_label": health_label,
+            "submitted_count": submitted_count,
+            "total_asgn_count": total_course_asgns,
         })
 
     return render_template("grades.html",
@@ -2403,6 +2617,14 @@ def _enrich_announcements(announcements):
         except Exception:
             ann["posted_fmt"] = (ann.get("posted_at") or "")[:10]
     return announcements
+
+
+@app.route("/announcements")
+def announcements_page():
+    announcements = _enrich_announcements(db.get_announcements(limit=100))
+    # Mark all as read when page is viewed
+    db.mark_all_announcements_read()
+    return render_template("announcements.html", announcements=announcements)
 
 
 @app.route("/api/announcement/<canvas_id>/read", methods=["POST"])

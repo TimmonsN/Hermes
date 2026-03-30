@@ -117,8 +117,20 @@
 <div class="grade-course-card" data-avg="{{ c.current_avg or 0 }}">
   <div class="grade-course-header">
     <div>
-      <div class="grade-course-name">{{ c.name }}</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div class="grade-course-name">{{ c.name }}</div>
+        {% if c.health_color and c.health_color != 'muted' %}
+        <span title="{{ c.health_label }} (health score: {{ c.health_score }}/100)"
+              style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--{{ c.health_color }}); flex-shrink:0;"></span>
+        <span style="font-size:11px; color:var(--{{ c.health_color }}); font-weight:600;">{{ c.health_label }}</span>
+        {% endif %}
+      </div>
       <div class="grade-course-code">{{ c.code }}</div>
+      {% if c.total_asgn_count > 0 %}
+      <div style="font-size:11px; color:var(--muted); margin-top:3px;">
+        {{ c.submitted_count }}/{{ c.total_asgn_count }} assignments graded
+      </div>
+      {% endif %}
     </div>
     <div style="text-align:right;">
       {% if c.current_avg is not none %}
@@ -186,8 +198,12 @@
     </div>
     {% if c.needed_on_final is not none %}
     <div class="grade-stat">
+      {% if c.needed_on_final > 100 %}
+      <div class="grade-stat-val" style="color:var(--red); font-size:12px;">OUT OF REACH</div>
+      {% else %}
       <div class="grade-stat-val">{{ c.needed_on_final }}%</div>
-      <div class="grade-stat-label">Needed on Final ({{ c.final_weight_pct }}%)</div>
+      {% endif %}
+      <div class="grade-stat-label">Needed on Final ({{ c.final_weight_pct }}% wt)</div>
     </div>
     {% endif %}
   </div>
@@ -201,7 +217,7 @@
     {% elif nof <= 100 %}
     <div class="need-score need-hard">You need {{ nof }}% on the final — time to get serious.</div>
     {% else %}
-    <div class="need-score need-impossible">You need {{ nof }}% on the final — target may be out of reach without extra credit.</div>
+    <div class="need-score need-impossible">{{ c.target }}% is out of reach — even a perfect final won't get you there. Lower your target or focus on extra credit opportunities.</div>
     {% endif %}
   {% endif %}
 
