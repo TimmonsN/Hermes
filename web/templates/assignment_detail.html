@@ -279,7 +279,11 @@
     <span class="tag">~{{ a.estimated_hours }}h estimated</span>
     {% endif %}
 
-    {% if course_weight_context %}
+    {% if grade_impact_pct is not none %}
+    <span style="font-size:12px; color:var(--yellow); font-weight:600;" title="Percentage of your final course grade this assignment is worth">
+      {{ grade_impact_pct }}% of final grade
+    </span>
+    {% elif course_weight_context %}
     <span style="font-size:12px; color:var(--muted);">{{ course_weight_context }}</span>
     {% endif %}
 
@@ -387,6 +391,14 @@
       <div style="font-size:12px; color:var(--muted); margin-top:2px;">{{ schedule_scenarios.wait.days_away }} day{% if schedule_scenarios.wait.days_away != 1 %}s{% endif %} from now</div>
     </div>
   </div>
+</div>
+{% endif %}
+
+<!-- How to Tackle This — study_strategy from AI -->
+{% if study_strategy %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.35); border-left:3px solid var(--accent);">
+  <h3 style="color:var(--accent);">How to Tackle This</h3>
+  <p style="font-size:14px; line-height:1.75; color:var(--text);">{{ study_strategy }}</p>
 </div>
 {% endif %}
 

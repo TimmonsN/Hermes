@@ -126,6 +126,10 @@
         &nbsp;·&nbsp;
         {% if c.on_track %}<span class="on-track">On track for target</span>
         {% else %}<span class="off-track">Below target</span>{% endif %}
+        {% if c.trend %}
+        &nbsp;·&nbsp;
+        <span style="color:var(--{{ c.trend_color }}); font-weight:600;" title="Grade trend based on assignment scores over time">{{ c.trend_icon }} {{ c.trend }}</span>
+        {% endif %}
       </div>
       {% else %}
       <div class="no-grade-yet">No grades yet</div>
@@ -194,6 +198,25 @@
     {% else %}
     <div class="need-score need-impossible">You need {{ nof }}% on the final — target may be out of reach without extra credit.</div>
     {% endif %}
+  {% endif %}
+
+  {% if c.projected_optimistic is not none or c.projected_realistic is not none %}
+  <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; margin-bottom:4px;">
+    {% if c.projected_optimistic is not none %}
+    <div style="flex:1; min-width:160px; background:rgba(74,222,128,0.06); border:1px solid rgba(74,222,128,0.2); border-radius:8px; padding:10px 14px;">
+      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:4px;">If you ace everything remaining</div>
+      <div style="font-size:22px; font-weight:700; color:var(--green);">{{ c.projected_optimistic }}%</div>
+      <div style="font-size:11px; color:var(--muted);">{{ letter_grade(c.projected_optimistic) }} — optimistic ceiling</div>
+    </div>
+    {% endif %}
+    {% if c.projected_realistic is not none %}
+    <div style="flex:1; min-width:160px; background:rgba(251,191,36,0.06); border:1px solid rgba(251,191,36,0.2); border-radius:8px; padding:10px 14px;">
+      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:4px;">If you maintain current pace</div>
+      <div style="font-size:22px; font-weight:700; color:var(--yellow);">{{ c.projected_realistic }}%</div>
+      <div style="font-size:11px; color:var(--muted);">{{ letter_grade(c.projected_realistic) }} — realistic projection</div>
+    </div>
+    {% endif %}
+  </div>
   {% endif %}
 
   {% if c.category_grades %}

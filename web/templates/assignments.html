@@ -78,7 +78,28 @@
 <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
   <h1>Assignments</h1>
 </div>
-<p class="subtitle" id="filterStats">{{ total }} upcoming &nbsp;·&nbsp; ~{{ total_hours }}h total</p>
+<p class="subtitle" id="filterStats">{{ total }} todo &nbsp;·&nbsp; ~{{ total_hours }}h total</p>
+
+{% if overdue %}
+<div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.35); border-radius:8px; padding:10px 16px; margin-bottom:14px; font-size:13px; color:var(--red); font-weight:600;">
+  {{ overdue|length }} overdue assignment{{ 's' if overdue|length != 1 }}: {{ overdue|map(attribute='title')|list|join(', ')|truncate(120) }}
+</div>
+{% endif %}
+
+<!-- Course completion stats -->
+{% if course_completion %}
+<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+  {% for cname, stats in course_completion.items() %}
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:11px;">
+    <span style="color:var(--muted);">{{ cname.split(' ')[-1] }}:</span>
+    <span style="font-weight:600; color:{% if stats.pct >= 80 %}var(--green){% elif stats.pct >= 50 %}var(--yellow){% else %}var(--red){% endif %};">
+      {{ stats.submitted }}/{{ stats.total }}
+    </span>
+    <span style="color:var(--muted);">({{ stats.pct }}%)</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 <!-- Filter bar -->
 <div class="filter-bar">
@@ -97,10 +118,10 @@
     <option value="medium">Medium</option>
     <option value="low">Low</option>
   </select>
-  <select class="filter-select" id="statusFilter" onchange="applyFilters()">
-    <option value="">All Statuses</option>
-    <option value="pending">Pending</option>
-    <option value="started">Started</option>
+  <select class="filter-select" id="completionFilter" onchange="applyFilters()">
+    <option value="todo">Todo</option>
+    <option value="done">Done</option>
+    <option value="">All</option>
   </select>
   <select class="filter-select" id="sortSelect" onchange="applyFilters()">
     <option value="due">Sort: Due Date</option>
@@ -120,9 +141,9 @@
   <button class="btn btn-ghost" style="font-size:12px;" onclick="clearSelection()">Clear</button>
 </div>
 
-{% if not assignments %}
+{% if not all_assignments %}
 <div class="card" style="text-align:center; padding:48px; color:var(--muted);">
-  No upcoming assignments found. Hermes will sync from Canvas automatically.
+  No assignments found. Hermes will sync from Canvas automatically.
 </div>
 {% else %}
 <div class="card" style="padding:0; overflow:hidden;" id="assignmentsTable">
@@ -143,21 +164,26 @@
       </tr>
     </thead>
     <tbody id="assignmentsBody">
-      {% for a in assignments %}
+      {% for a in all_assignments %}
+      {% set is_done = a.status in ('submitted', 'complete') %}
+      {% set is_overdue = a.due_class == 'due-soon' and a.due_fmt and a.due_fmt.startswith('Overdue') %}
       <tr id="arow-{{ a.id }}"
           data-title="{{ a.title | lower }}"
           data-course="{{ a.course_name | lower }}"
           data-priority="{{ a.priority }}"
           data-status="{{ a.status }}"
+          data-done="{{ 'done' if is_done else 'todo' }}"
           data-difficulty="{{ a.difficulty or 0 }}"
           data-hours="{{ a.estimated_hours or 0 }}"
-          data-due="{{ a.due_at or '' }}">
+          data-due="{{ a.due_at or '' }}"
+          style="{% if is_done %}opacity:0.55;{% elif is_overdue %}border-left:3px solid var(--red);{% endif %}">
         <td>
           <input type="checkbox" class="row-check assignment-check" value="{{ a.id }}"
                  onchange="onRowCheck()" />
         </td>
         <td>
-          <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ a.title }}</a>
+          <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; {% if is_done %}text-decoration:line-through; color:var(--muted);{% endif %}">{{ a.title }}</a>
+          {% if is_done %}<span style="font-size:10px; color:var(--green); margin-left:6px;">submitted</span>{% endif %}
         </td>
         <td style="color:var(--muted);">{{ a.course_name }}</td>
         <td class="{{ a.due_class }}">{{ a.due_fmt }}</td>
@@ -174,7 +200,7 @@
         <td style="color:var(--muted);">{% if a.estimated_hours %}~{{ a.estimated_hours }}h{% else %}—{% endif %}</td>
         <td style="color:var(--accent); font-size:12px;">{{ a.start_by_fmt or '—' }}</td>
         <td>
-          {% if a.checklist_stats.total > 0 %}
+          {% if a.checklist_stats is defined and a.checklist_stats.total > 0 %}
           <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted);">
             {{ a.checklist_stats.done }}/{{ a.checklist_stats.total }}
             <div class="completion-bar">
@@ -186,12 +212,12 @@
         <td>
           {% if a.has_early_bonus %}<span class="tag tag-bonus">bonus</span>{% endif %}
           {% if a.can_resubmit %}<span class="tag tag-bonus">resub</span>{% endif %}
-          {% if not a.difficulty %}<span class="tag">analyzing...</span>{% endif %}
+          {% if not a.difficulty and not is_done %}<span class="tag">analyzing...</span>{% endif %}
         </td>
         <td>
           <button class="btn btn-ghost" id="done-{{ a.id }}"
-                  style="font-size:11px; padding:3px 8px; color:var(--green); border-color:var(--green);"
-                  onclick="markDoneRow('{{ a.id }}', this)">Done</button>
+                  style="font-size:11px; padding:3px 8px; {% if is_done %}color:var(--muted); border-color:var(--border);{% else %}color:var(--green); border-color:var(--green);{% endif %}"
+                  onclick="toggleDoneRow('{{ a.id }}', this, {{ 'true' if is_done else 'false' }})">{{ 'Undo' if is_done else 'Done' }}</button>
         </td>
       </tr>
       {% endfor %}
@@ -203,11 +229,14 @@
 <script>
 const priorityOrder = {critical: 0, high: 1, medium: 2, low: 3};
 
+// Default to 'todo' filter on load
+document.addEventListener('DOMContentLoaded', () => applyFilters());
+
 function applyFilters() {
   const search = document.getElementById('searchInput').value.toLowerCase();
   const course = document.getElementById('courseFilter').value.toLowerCase();
   const priority = document.getElementById('priorityFilter').value;
-  const status = document.getElementById('statusFilter').value;
+  const completion = document.getElementById('completionFilter').value; // 'todo', 'done', or ''
   const sortBy = document.getElementById('sortSelect').value;
 
   const tbody = document.getElementById('assignmentsBody');
@@ -218,14 +247,14 @@ function applyFilters() {
     const title = row.dataset.title || '';
     const rowCourse = row.dataset.course || '';
     const rowPriority = row.dataset.priority || '';
-    const rowStatus = row.dataset.status || '';
+    const rowDone = row.dataset.done || 'todo';
 
     const matchSearch = !search || title.includes(search) || rowCourse.includes(search);
     const matchCourse = !course || rowCourse.includes(course);
     const matchPriority = !priority || rowPriority === priority;
-    const matchStatus = !status || rowStatus === status;
+    const matchCompletion = !completion || rowDone === completion;
 
-    if (matchSearch && matchCourse && matchPriority && matchStatus) {
+    if (matchSearch && matchCourse && matchPriority && matchCompletion) {
       row.style.display = '';
       visible.push(row);
     } else {
@@ -251,7 +280,7 @@ function applyFilters() {
 
   // Update stats
   let totalHours = 0;
-  visible.forEach(r => { totalHours += parseFloat(r.dataset.hours) || 0; });
+  visible.forEach(r => { if (r.dataset.done !== 'done') totalHours += parseFloat(r.dataset.hours) || 0; });
   document.getElementById('filterCount').textContent =
     `${visible.length} shown · ~${totalHours.toFixed(1)}h`;
 }
@@ -289,15 +318,22 @@ async function bulkMarkDone() {
   location.reload();
 }
 
-async function markDoneRow(id, btn) {
-  await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
-  btn.textContent = 'Done!';
-  btn.disabled = true;
-  btn.style.opacity = '0.4';
-  btn.style.borderColor = 'var(--border)';
-  btn.style.color = 'var(--muted)';
+async function toggleDoneRow(id, btn, isDone) {
+  const resp = await fetch(`/api/assignment/${id}/toggle-complete`, {method: 'POST'});
+  const data = await resp.json();
   const row = document.getElementById('arow-' + id);
-  if (row) row.style.opacity = '0.5';
+  if (data.new_status === 'submitted' || data.new_status === 'complete') {
+    btn.textContent = 'Undo';
+    btn.style.color = 'var(--muted)';
+    btn.style.borderColor = 'var(--border)';
+    if (row) { row.style.opacity = '0.55'; row.dataset.done = 'done'; }
+  } else {
+    btn.textContent = 'Done';
+    btn.style.color = 'var(--green)';
+    btn.style.borderColor = 'var(--green)';
+    if (row) { row.style.opacity = '1'; row.dataset.done = 'todo'; }
+  }
+  applyFilters();
 }
 </script>
 {% endblock %}

@@ -48,10 +48,19 @@
     <span class="sep">·</span>
     <span style="color:var(--yellow);">{{ e.date_fmt }}</span>
     {% endif %}
+    {% if days_until_exam is not none %}
+    <span class="sep">·</span>
+    <span style="color:{% if days_until_exam <= 3 %}var(--red){% elif days_until_exam <= 7 %}var(--yellow){% else %}var(--muted){% endif %}; font-weight:600;">
+      {% if days_until_exam == 0 %}TODAY{% elif days_until_exam == 1 %}Tomorrow{% else %}{{ days_until_exam }} days away{% endif %}
+    </span>
+    {% endif %}
   </div>
 
   <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
     <span class="badge badge-{{ e.priority or 'high' }}">{{ e.priority or 'high' }}</span>
+    {% if exam_group_weight %}
+    <span class="tag" style="color:var(--yellow); border-color:var(--yellow);">{{ exam_group_weight|int }}% of final grade</span>
+    {% endif %}
     {% if e.study_hours_estimated %}
     <span class="tag">~{{ e.study_hours_estimated }}h total study</span>
     {% endif %}
@@ -63,6 +72,33 @@
     {% endif %}
   </div>
 </div>
+
+<!-- Grade context -->
+{% if exam_group_weight or exam_category_current is not none %}
+<div class="info-block" style="border-color:rgba(251,191,36,0.3);">
+  <h3>Grade Stakes</h3>
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+    {% if exam_group_weight %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:var(--yellow); line-height:1;">{{ exam_group_weight|int }}%</div>
+      <div style="font-size:11px; color:var(--muted);">weight in final grade</div>
+    </div>
+    {% endif %}
+    {% if exam_category_current is not none %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:{% if exam_category_current >= 90 %}var(--green){% elif exam_category_current >= 80 %}var(--yellow){% else %}var(--red){% endif %}; line-height:1;">{{ exam_category_current }}%</div>
+      <div style="font-size:11px; color:var(--muted);">current {{ exam_category_name or 'exam' }} avg</div>
+    </div>
+    {% endif %}
+    {% if target_grade %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:var(--accent); line-height:1;">{{ target_grade|int }}%</div>
+      <div style="font-size:11px; color:var(--muted);">your target for this course</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
 {% if reasoning %}
 <div class="info-block">
@@ -76,6 +112,21 @@
 </div>
 {% endif %}
 
+{% if daily_study_plan %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.25);">
+  <h3>Daily Study Plan</h3>
+  {% for day in daily_study_plan %}
+  <div style="display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--border);">
+    <div style="width:36px; height:36px; border-radius:50%; background:var(--surface2); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; color:var(--accent); flex-shrink:0;">{{ day.day }}</div>
+    <div style="flex:1;">
+      <div style="font-size:13px; font-weight:500;">{{ day.focus }}</div>
+      <div style="font-size:11px; color:var(--muted);">{{ day.hours }}h</div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if study_tips %}
 <div class="info-block">
   <h3>Study Tips</h3>
@@ -84,6 +135,20 @@
     <li>{{ tip }}</li>
     {% endfor %}
   </ul>
+</div>
+{% endif %}
+
+{% if recent_graded %}
+<div class="info-block">
+  <h3>Recent Graded Work — What the Exam Likely Covers</h3>
+  {% for a in recent_graded %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+    {% if a.grade_pct is defined and a.grade_pct is not none %}
+    <span style="font-weight:600; margin-left:12px; flex-shrink:0; color:{% if a.grade_pct >= 90 %}var(--green){% elif a.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">{{ "%.0f"|format(a.grade_pct) }}%</span>
+    {% endif %}
+  </div>
+  {% endfor %}
 </div>
 {% endif %}
 

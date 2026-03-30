@@ -113,6 +113,63 @@
   {% endif %}
 </div>
 
+<!-- Daily Digest: what to do RIGHT NOW -->
+{% if daily_digest.overdue %}
+<div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">OVERDUE — Turn These In Now</div>
+  {% for a in daily_digest.overdue %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(248,113,113,0.2); font-size:13px;">
+    <a href="/assignments/{{ a.id }}" style="color:var(--red); text-decoration:none; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+    <span style="color:var(--muted); font-size:11px; margin-left:8px; flex-shrink:0;">{{ a.course_name }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if daily_digest.due_today or daily_digest.should_start_today or daily_digest.exam_countdown %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:10px;">Today's Action List</div>
+
+  {% if daily_digest.due_today %}
+  <div style="margin-bottom:8px;">
+    <div style="font-size:11px; color:var(--red); font-weight:600; margin-bottom:4px;">DUE TODAY</div>
+    {% for a in daily_digest.due_today %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ a.course_name }}</span>
+      <span class="badge badge-{{ a.priority }}" style="flex-shrink:0;">{{ a.priority }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if daily_digest.should_start_today %}
+  <div style="{% if daily_digest.due_today %}border-top:1px solid var(--border); padding-top:8px;{% endif %} margin-bottom:4px;">
+    <div style="font-size:11px; color:var(--accent); font-weight:600; margin-bottom:4px;">START TODAY</div>
+    {% for a in daily_digest.should_start_today[:3] %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">due {{ a.due_fmt }}</span>
+      <span class="tag" style="flex-shrink:0;">~{{ a.estimated_hours }}h</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if daily_digest.exam_countdown %}
+  <div style="{% if daily_digest.due_today or daily_digest.should_start_today %}border-top:1px solid var(--border); padding-top:8px;{% endif %}">
+    <div style="font-size:11px; color:var(--yellow); font-weight:600; margin-bottom:4px;">EXAMS COMING</div>
+    {% for e in daily_digest.exam_countdown %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/exams/{{ e.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ e.title }}</a>
+      <span style="color:var(--yellow); font-size:12px; font-weight:700; flex-shrink:0;">{{ e.days_until }}d away</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <!-- 2x2 info grid -->
 <div class="dash-grid">
   <!-- Today's Focus -->
