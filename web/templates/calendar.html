@@ -5,6 +5,12 @@
 <h1>Calendar</h1>
 <p class="subtitle">4-week view &nbsp;·&nbsp; starts Sunday</p>
 
+{% if week_synthesis %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:20px; font-size:13px; line-height:1.6; color:var(--text);">
+  <span style="color:var(--accent); font-weight:600; margin-right:6px;">⟡ Hermes</span>{{ week_synthesis }}
+</div>
+{% endif %}
+
 <style>
   .cal-day-headers {
     display: grid;

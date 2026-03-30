@@ -269,17 +269,18 @@
   <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
     <span class="badge badge-{{ a.priority or 'medium' }}">{{ a.priority or 'medium' }}</span>
 
-    {% if a.difficulty %}
-    <div class="diff-dots" title="Difficulty {{ a.difficulty }}/10">
-      {% for i in range(1, 11) %}
-      <div class="diff-dot {% if i <= a.difficulty %}{% if a.difficulty >= 8 %}critical{% elif a.difficulty >= 6 %}high{% else %}filled{% endif %}{% endif %}"></div>
-      {% endfor %}
-    </div>
-    <span style="color:var(--muted); font-size:12px;">{{ a.difficulty }}/10</span>
+    {% if a.workload_label %}
+    <span class="tag" style="color:{{ a.workload_color }}; border-color:{{ a.workload_color }}; background:rgba(0,0,0,0.1);">
+      {{ a.workload_label }}
+    </span>
     {% endif %}
 
     {% if a.estimated_hours %}
     <span class="tag">~{{ a.estimated_hours }}h estimated</span>
+    {% endif %}
+
+    {% if course_weight_context %}
+    <span style="font-size:12px; color:var(--muted);">{{ course_weight_context }}</span>
     {% endif %}
 
     {% if a.start_by_fmt %}
@@ -312,6 +313,7 @@
           onclick="markDone('{{ a.id }}', this)">Mark Done</button>
   <button class="btn btn-ghost"
           onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
+  <button class="btn btn-ghost" onclick="forceReanalyze('{{ a.id }}', this)" title="Clear stale analysis and re-analyze with current course materials">Re-analyze</button>
   {% if a.html_url %}
   <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost">Open in Canvas ↗</a>
   {% endif %}
@@ -370,12 +372,40 @@
 </div>
 {% endif %}
 
+{% if schedule_scenarios %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.2);">
+  <h3>Schedule This</h3>
+  <div style="display:flex; gap:12px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:180px; background:{% if schedule_scenarios.feasible_now %}rgba(74,222,128,0.07){% else %}rgba(251,191,36,0.07){% endif %}; border:1px solid {% if schedule_scenarios.feasible_now %}rgba(74,222,128,0.25){% else %}rgba(251,191,36,0.25){% endif %}; border-radius:8px; padding:12px;">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:{% if schedule_scenarios.feasible_now %}var(--green){% else %}var(--yellow){% endif %}; margin-bottom:6px;">Start Tonight</div>
+      <div style="font-size:22px; font-weight:700; color:var(--text);">{{ schedule_scenarios.start_now.hrs_per_day }}h<span style="font-size:13px; font-weight:400; color:var(--muted);">/day</span></div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">spread over {{ schedule_scenarios.start_now.days }} day{% if schedule_scenarios.start_now.days != 1 %}s{% endif %}</div>
+    </div>
+    <div style="flex:1; min-width:180px; background:{% if schedule_scenarios.feasible_wait %}rgba(251,191,36,0.07){% else %}rgba(248,113,113,0.07){% endif %}; border:1px solid {% if schedule_scenarios.feasible_wait %}rgba(251,191,36,0.25){% else %}rgba(248,113,113,0.25){% endif %}; border-radius:8px; padding:12px;">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:{% if schedule_scenarios.feasible_wait %}var(--yellow){% else %}var(--red){% endif %}; margin-bottom:6px;">Wait Until Night Before</div>
+      <div style="font-size:22px; font-weight:700; color:var(--text);">{{ schedule_scenarios.wait.hrs_total }}h<span style="font-size:13px; font-weight:400; color:var(--muted);"> straight</span></div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">{{ schedule_scenarios.wait.days_away }} day{% if schedule_scenarios.wait.days_away != 1 %}s{% endif %} from now</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- Hermes Analysis (shown for all analyzed assignments) -->
 {% if reasoning or study_suggestions or watch_outs %}
 <div class="info-block">
   <h3>Hermes Analysis</h3>
   {% if reasoning %}
-  <p class="reasoning-text" style="margin-bottom: {% if study_suggestions or watch_outs %}14px{% else %}0{% endif %};">{{ reasoning }}</p>
+  <p class="reasoning-text" style="margin-bottom: {% if task_sections or study_suggestions or watch_outs %}14px{% else %}0{% endif %};">{{ reasoning }}</p>
+  {% endif %}
+  {% if task_sections %}
+  <div style="margin-bottom:14px;">
+    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">What you're actually doing</div>
+    <ul class="suggestion-list">
+      {% for task in task_sections %}
+      <li>{{ task }}</li>
+      {% endfor %}
+    </ul>
+  </div>
   {% endif %}
   {% if study_suggestions %}
   <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">How to approach it</div>
@@ -398,6 +428,31 @@
 <div class="info-block" style="border-color:rgba(124,108,255,0.15);">
   <h3>Hermes Analysis</h3>
   <p style="font-size:13px; color:var(--muted);">Analysis pending — Hermes will analyze this on the next analysis run. Trigger one from the dashboard if needed.</p>
+</div>
+{% endif %}
+
+<!-- Course Materials Hermes Is Using For This Assignment -->
+{% if course_materials %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.15);">
+  <h3>Sources Hermes Used
+    <span style="font-weight:400; color:var(--muted); margin-left:6px; font-size:11px;">{{ course_materials|length }} relevant file{{ 's' if course_materials|length != 1 }}</span>
+  </h3>
+  {% for m in course_materials %}
+  <div style="margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <span style="color:{% if m.kind == 'syllabus' %}var(--accent){% elif m.kind == 'page' %}var(--yellow){% else %}var(--green){% endif %}; font-size:13px; flex-shrink:0;">
+        {% if m.kind == 'syllabus' %}📋{% elif m.kind == 'page' %}📄{% else %}📁{% endif %}
+      </span>
+      <span style="color:var(--text); font-size:13px; font-weight:500; word-break:break-word;">{{ m.label }}</span>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">~{{ (m.chars / 1000)|round(1) }}k chars</span>
+    </div>
+    {% if m.snippet %}
+    <div style="font-size:12px; color:var(--muted); padding-left:24px; line-height:1.5; font-style:italic; border-left:2px solid var(--border); margin-left:4px;">
+      {{ m.snippet }}…
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
 </div>
 {% endif %}
 
@@ -463,6 +518,13 @@ async function markDone(id, btn) {
   btn.textContent = 'Done!';
   btn.style.opacity = '0.5';
   btn.disabled = true;
+}
+
+async function forceReanalyze(id, btn) {
+  btn.textContent = 'Queued...';
+  btn.disabled = true;
+  await fetch(`/api/assignment/${id}/reanalyze`, {method: 'POST'});
+  btn.textContent = 'Sync triggered — refresh in ~30s';
 }
 
 function showDiffEdit(id, currentDiff, currentHours) {

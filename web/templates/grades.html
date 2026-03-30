@@ -109,7 +109,7 @@
 {% endif %}
 
 {% for c in course_summaries %}
-<div class="grade-course-card">
+<div class="grade-course-card" data-avg="{{ c.current_avg or 0 }}">
   <div class="grade-course-header">
     <div>
       <div class="grade-course-name">{{ c.name }}</div>
@@ -148,6 +148,7 @@
   </div>
   {% endif %}
 
+
   <div class="grade-stats-row">
     <div class="grade-stat">
       <div class="grade-stat-val">{{ c.graded_count }}</div>
@@ -159,12 +160,20 @@
       <div class="grade-stat-label">Current Avg</div>
     </div>
     {% endif %}
-    <div class="grade-stat" style="display:flex; align-items:center; gap:8px;">
-      <div>
-        <div class="grade-stat-label">Target</div>
+    <div class="grade-stat">
+      <div class="grade-stat-label">Target</div>
+      <div style="display:flex; align-items:center; gap:6px; margin-top:2px;">
         <input class="goal-input" type="number" min="0" max="100" value="{{ c.target }}"
-               onchange="setGoal('{{ c.id }}', this.value)" />
+               oninput="setGoal('{{ c.id }}', this.value, this)" />
+        {% if c.ai_suggested_target %}
+        <span style="font-size:11px; color:var(--accent);" title="{{ c.ai_target_reasoning or '' }}">
+          ✦ {{ c.ai_suggested_target }}%
+        </span>
+        {% endif %}
       </div>
+      {% if c.ai_target_reasoning %}
+      <div style="font-size:11px; color:var(--muted); margin-top:3px; max-width:200px;">{{ c.ai_target_reasoning }}</div>
+      {% endif %}
     </div>
     {% if c.needed_on_final is not none %}
     <div class="grade-stat">
@@ -187,16 +196,19 @@
     {% endif %}
   {% endif %}
 
-  {% if c.grades %}
+  {% if c.category_grades %}
   <div class="recent-grades">
-    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Recent Grades</div>
-    {% for g in c.grades %}
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Grade Breakdown</div>
+    {% for cat in c.category_grades %}
     <div class="recent-grade-row">
-      <span style="color:var(--text);">{{ g.title or 'Assignment' }}</span>
-      <span>
-        <span style="color:{% if g.grade_pct >= 90 %}var(--green){% elif g.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %}; font-weight:600;">
-          {{ g.points_earned }}/{{ g.points_possible }} ({{ "%.1f"|format(g.grade_pct) }}%)
-        </span>
+      <span>{{ cat.name }} <span style="color:var(--muted); font-size:11px;">({{ cat.weight|int }}%)</span></span>
+      <span style="display:flex; align-items:center; gap:8px;">
+        {% if cat.current_pct is not none %}
+        <span style="font-weight:600; color:{% if cat.current_pct >= 90 %}var(--green){% elif cat.current_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">{{ cat.current_pct }}%</span>
+        <span style="color:var(--muted); font-size:11px;">{{ cat.graded_count }}/{{ cat.total_count }} graded</span>
+        {% else %}
+        <span style="color:var(--muted); font-style:italic; font-size:11px;">Not yet graded</span>
+        {% endif %}
       </span>
     </div>
     {% endfor %}
@@ -206,12 +218,36 @@
 {% endfor %}
 
 <script>
-async function setGoal(courseId, target) {
-  await fetch(`/api/grade-goal/${courseId}`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({target: parseFloat(target)})
-  });
+async function setGoal(courseId, target, inputEl) {
+  target = parseFloat(target);
+  if (isNaN(target)) return;
+  // Update target marker on bar
+  const card = inputEl.closest('.grade-course-card');
+  if (card) {
+    const marker = card.querySelector('.grade-bar-target');
+    if (marker) marker.style.left = Math.min(target, 100) + '%';
+    // Update on-track indicator
+    const avg = parseFloat(card.dataset.avg);
+    const onTrackEl = card.querySelector('.on-track, .off-track');
+    if (onTrackEl && !isNaN(avg)) {
+      if (avg >= target) {
+        onTrackEl.className = 'on-track';
+        onTrackEl.textContent = 'On track for target';
+      } else {
+        onTrackEl.className = 'off-track';
+        onTrackEl.textContent = 'Below target';
+      }
+    }
+  }
+  // Persist to server (debounced)
+  clearTimeout(inputEl._saveTimer);
+  inputEl._saveTimer = setTimeout(async () => {
+    await fetch(`/api/grade-goal/${courseId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target})
+    });
+  }, 600);
 }
 </script>
 {% endblock %}
