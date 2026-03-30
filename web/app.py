@@ -72,17 +72,53 @@ def _fmt_start_by(start_by_str):
 
 _late_policy_cache = {}  # course_id -> (accepts: bool|None, reason: str)
 
-def _late_policy_for_course(course_id: str):
-    """Read the stored syllabus late_policy and return (accepts_late: bool|None, reason: str).
+_NO_LATE_PHRASES = [
+    "no late", "not accepted", "will not be accepted", "not be accepted",
+    "0 credit", "zero credit", "no credit after", "no credit for late",
+    "cannot be submitted late", "no makeup", "no make-up",
+    "submissions will not", "will receive a 0", "receive a zero",
+    "no extensions", "not eligible for late", "strictly no late",
+    "late work will not", "late submissions will not", "no late work",
+    "past due assignments", "not graded after", "not accepted after",
+]
+_YES_LATE_PHRASES = [
+    "% per day", "percent per day", "per day late", "late penalty",
+    "late submission", "accepted late", "accept late",
+    "within 24", "within 48", "within 72", "within one week",
+    "deduction per day", "deducted per day", "points off per day",
+    "late work accepted", "late work will be accepted",
+    "late with penalty", "submitted late for partial",
+    "up to one week late", "up to 1 week", "by end of week",
+    "through carmen", "by the end of the semester",
+    "10% per", "20% per", "25% per", "50% per",
+]
 
-    Returns:
-        True  — syllabus explicitly allows late submissions (may have penalty)
-        False — syllabus explicitly forbids late submissions
-        None  — policy unknown; defer to Canvas lock_at as the only signal
+def _scan_text_for_late_policy(text: str):
+    """Scan raw text for late policy signals. Returns (True/False/None, reason)."""
+    t = text.lower()
+    if any(p in t for p in _NO_LATE_PHRASES):
+        return False, "Syllabus: late work not accepted."
+    if any(p in t for p in _YES_LATE_PHRASES):
+        return True, "Syllabus allows late submission (likely with a grade penalty)."
+    return None, ""
+
+def _late_policy_for_course(course_id: str):
+    """Determine late submission policy for a course.
+
+    Checks in order:
+    1. The AI-summarized late_policy field from rules_json
+    2. The raw syllabus content (full text search) if summary is inconclusive
+    3. Course notes stored by Hermes
+
+    Returns (True/False/None, reason):
+        True  — late submissions accepted (may have penalty)
+        False — late submissions not accepted
+        None  — genuinely no information found in any source
     """
     if course_id in _late_policy_cache:
         return _late_policy_cache[course_id]
 
+    syllabi = []
     rules = {}
     try:
         syllabi = db.get_syllabus(str(course_id))
@@ -95,94 +131,94 @@ def _late_policy_for_course(course_id: str):
     except Exception:
         pass
 
-    policy_text = (rules.get("late_policy") or "").lower().strip()
+    # Step 1: check the AI-summarized late_policy field
+    policy_text = (rules.get("late_policy") or "").strip()
+    is_vague = (not policy_text
+                or policy_text.lower() in ("none", "n/a", "unknown", "not specified")
+                or "not specified" in policy_text.lower()
+                or len(policy_text) < 10)
 
-    NO_LATE_PHRASES = [
-        "no late", "not accepted", "will not be accepted", "not be accepted",
-        "0 credit", "zero credit", "no credit after", "no credit for late",
-        "cannot be submitted late", "no makeup", "no make-up",
-        "submissions will not", "will receive a 0", "receive a zero",
-        "no extensions", "not eligible for late", "strictly no late",
-    ]
-    YES_LATE_PHRASES = [
-        "% per day", "percent per day", "per day late", "late penalty",
-        "late submission", "accepted late", "accept late",
-        "within 24", "within 48", "within 72", "within one week",
-        "deduction per day", "deducted per day", "points off per day",
-        "late work accepted", "late work will be accepted",
-        "late with penalty", "submitted late for partial",
-        "up to one week late", "up to 1 week", "by end of week",
-        "through carmen", "by the end of the semester",
-    ]
+    if not is_vague:
+        result, reason = _scan_text_for_late_policy(policy_text)
+        if result is not None:
+            _late_policy_cache[course_id] = (result, reason)
+            return result, reason
 
-    result = None
-    reason = "No late policy found in syllabus."
+    # Step 2: scan raw syllabus content directly — the AI summary may have missed it
+    for s in syllabi:
+        raw_content = (s.get("content") or "").strip()
+        if not raw_content:
+            continue
+        result, reason = _scan_text_for_late_policy(raw_content)
+        if result is not None:
+            _late_policy_cache[course_id] = (result, reason)
+            return result, reason
 
-    if not policy_text or "not specified" in policy_text or policy_text in ("none", "n/a", "unknown"):
-        result = None
-        reason = "Late policy not specified in syllabus."
-    elif any(p in policy_text for p in NO_LATE_PHRASES):
-        result = False
-        reason = f"Syllabus: late work not accepted."
-    elif any(p in policy_text for p in YES_LATE_PHRASES):
-        result = True
-        reason = f"Syllabus allows late submission (may have penalty)."
-    else:
-        # Policy text exists but doesn't match either category clearly
-        result = None
-        reason = "Late policy unclear — cannot make a definitive call from syllabus."
+    # Step 3: check course notes (Hermes's synthesized understanding of the course)
+    try:
+        course_notes = db.get_course_notes(str(course_id)) or ""
+        if course_notes:
+            result, reason = _scan_text_for_late_policy(course_notes)
+            if result is not None:
+                _late_policy_cache[course_id] = (result, reason)
+                return result, reason
+    except Exception:
+        pass
 
-    _late_policy_cache[course_id] = (result, reason)
-    return result, reason
+    # No policy found in any source
+    _late_policy_cache[course_id] = (None, "")
+    return None, ""
 
 
 def _assignment_still_submittable(a: dict, now: datetime) -> tuple:
     """Determine if an overdue assignment can still earn points.
 
-    Returns (submittable: bool, reason: str).
-    Hermes makes the call — user should never need to check this themselves.
+    Returns (submittable: bool|None, reason: str).
+    True  = confirmed open, submit now
+    False = confirmed closed, skip
+    None  = no information to go on — show with minimal note
     """
     # 1. Non-submission types are never submittable
     sub_types = (a.get("submission_types") or "").strip()
     if sub_types in ("none", "not_graded", "on_paper"):
-        return False, "Not a digital submission — no action needed."
+        return False, ""
 
-    # 2. Canvas hard lock is the strongest signal
+    # 2. Canvas lock_at is the hardest signal available
     lock_at = a.get("lock_at")
     if lock_at:
         try:
             lock_dt = _from_canvas_time(lock_at)
             if lock_dt < now:
-                return False, f"Canvas closed submissions on {lock_dt.strftime('%b %d')}."
+                return False, ""
         except Exception:
             pass
 
-    # 3. Check syllabus late policy
+    # 3. Exams can never be retaken
+    title_lower = (a.get("title") or "").lower()
+    if any(kw in title_lower for kw in ("midterm", "final exam", "exam", "quiz")):
+        return False, ""
+
+    # 4. Syllabus + raw content + course notes check
     cid = str(a.get("course_id", ""))
     accepts_late, policy_reason = _late_policy_for_course(cid)
     if accepts_late is False:
-        return False, policy_reason
+        return False, ""
     if accepts_late is True:
         return True, policy_reason
 
-    # 4. Heuristic: exams/midterms/finals are never resubmittable after the fact
-    title_lower = (a.get("title") or "").lower()
-    if any(kw in title_lower for kw in ("midterm", "final exam", "exam", "quiz")):
-        return False, "Exams cannot be retaken after the due date."
-
-    # 5. Policy unknown and no hard lock — flag as uncertain but potentially submittable
-    # Only flag if it's been less than 14 days since it was due (past that, almost certainly closed)
+    # 5. >14 days overdue with no lock_at and no late policy = almost certainly closed
     due_at = a.get("due_at")
     if due_at:
         try:
             due_dt = _from_canvas_time(due_at)
-            days_overdue = (now - due_dt).days
-            if days_overdue > 14:
-                return False, "More than 2 weeks overdue — submission window almost certainly closed."
+            if (now - due_dt).days > 14:
+                return False, ""
         except Exception:
             pass
 
-    return None, "Policy unclear — verify with instructor before attempting late submission."
+    # Still here: lock_at not set, policy not found, recent enough to possibly be open
+    # Show it but be honest that we couldn't confirm the policy
+    return None, "Late policy not found in syllabus — submission window may still be open."
 
 
 def _calc_priority_score(a: dict, now: datetime = None) -> float:
@@ -1406,8 +1442,22 @@ def _grade_color(pct):
 
 @app.route("/grades")
 def grades_page():
+    import threading
     courses = db.get_courses()
     all_grades = db.get_all_grades()
+
+    # If there are no grades at all, auto-trigger a background sync instead of
+    # asking the user to do it manually.
+    auto_syncing = False
+    if not all_grades and courses:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+            import hermes as _h
+            threading.Thread(target=_h.sync_canvas, daemon=True).start()
+            auto_syncing = True
+        except Exception:
+            pass
 
     course_summaries = []
     for c in courses:
@@ -1593,6 +1643,7 @@ def grades_page():
         course_summaries=course_summaries,
         letter_grade=_letter_grade,
         grade_color=_grade_color,
+        auto_syncing=auto_syncing,
     )
 
 

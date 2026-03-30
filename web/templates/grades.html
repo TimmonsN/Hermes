@@ -103,8 +103,13 @@
 
 {% if not course_summaries or course_summaries | selectattr('current_avg') | list | length == 0 %}
 <div class="card" style="padding:32px; text-align:center;">
+  {% if auto_syncing %}
+  <div style="font-size:18px; margin-bottom:8px; color:var(--accent);">Syncing grades from Canvas...</div>
+  <div style="font-size:13px; color:var(--muted);">Hermes is pulling your latest grades now. Refresh in a moment.</div>
+  {% else %}
   <div style="font-size:18px; margin-bottom:8px; color:var(--muted);">No grade data yet.</div>
-  <div style="font-size:13px; color:var(--muted);">Grades sync automatically from Canvas. Trigger a sync to pull the latest.</div>
+  <div style="font-size:13px; color:var(--muted);">Grades sync automatically at 2PM and 8PM daily.</div>
+  {% endif %}
 </div>
 {% endif %}
 
