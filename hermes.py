@@ -766,10 +766,12 @@ def main():
         else:
             logger.info(f"Skipping startup sync — last sync was {sync_age_hours:.1f}h ago (< 2h cooldown).")
 
-        # Scheduler
+        # Scheduler — sync hours configurable via DB prefs (set from Settings page)
+        sync_hour_1 = int(db.get_pref("sync_hour_1") or 14)
+        sync_hour_2 = int(db.get_pref("sync_hour_2") or 20)
         scheduler = BackgroundScheduler(timezone="America/New_York")
-        scheduler.add_job(sync_canvas, CronTrigger(hour=14, minute=0), id="sync_afternoon")
-        scheduler.add_job(sync_canvas, CronTrigger(hour=20, minute=0), id="sync_evening")
+        scheduler.add_job(sync_canvas, CronTrigger(hour=sync_hour_1, minute=0), id="sync_afternoon")
+        scheduler.add_job(sync_canvas, CronTrigger(hour=sync_hour_2, minute=0), id="sync_evening")
         scheduler.add_job(send_daily_digest, CronTrigger(hour=Config.DIGEST_HOUR, minute=5), id="digest")
         scheduler.add_job(check_and_notify, "interval", minutes=30, id="notifications")
         scheduler.start()

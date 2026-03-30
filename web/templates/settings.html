@@ -111,16 +111,33 @@
 <div class="settings-section">
   <h3>Sync Schedule</h3>
   <div class="settings-row">
-    <span class="settings-label">Automatic sync</span>
-    <span class="settings-value">2:00 PM and 8:00 PM daily (Eastern)</span>
+    <span class="settings-label">Sync time 1</span>
+    <span class="settings-value">
+      <select id="syncHour1" class="toggle-switch" style="width:auto; padding:2px 6px; background:var(--surface2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; font-size:13px;" onchange="saveSyncSchedule()">
+        {% for h in range(6, 24) %}
+        <option value="{{ h }}" {% if h == sync_hour_1 %}selected{% endif %}>{{ '%d:00 %s'|format(h if h <= 12 else h - 12, 'AM' if h < 12 else 'PM') }}</option>
+        {% endfor %}
+      </select>
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Sync time 2</span>
+    <span class="settings-value">
+      <select id="syncHour2" class="toggle-switch" style="width:auto; padding:2px 6px; background:var(--surface2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; font-size:13px;" onchange="saveSyncSchedule()">
+        {% for h in range(6, 24) %}
+        <option value="{{ h }}" {% if h == sync_hour_2 %}selected{% endif %}>{{ '%d:00 %s'|format(h if h <= 12 else h - 12, 'AM' if h < 12 else 'PM') }}</option>
+        {% endfor %}
+      </select>
+    </span>
   </div>
   <div class="settings-row">
     <span class="settings-label">Daily digest</span>
     <span class="settings-value">{{ digest_hour }}:05 {{ 'AM' if digest_hour < 12 else 'PM' }}</span>
   </div>
   <div style="margin-top:10px; font-size:12px; color:var(--muted);">
-    Sync schedule is configured in <code>.env</code> (DIGEST_HOUR). Hermes restarts apply schedule changes.
+    Sync schedule changes apply immediately. Hermes reads these from the database on each run.
   </div>
+  <div id="syncSchedStatus" style="font-size:12px; color:var(--green); margin-top:6px; display:none;">Saved!</div>
 </div>
 
 <!-- Course Visibility -->
@@ -171,6 +188,19 @@ async function toggleCourse(courseId, ignored) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ignored: ignored})
   });
+}
+
+async function saveSyncSchedule() {
+  const h1 = parseInt(document.getElementById('syncHour1').value);
+  const h2 = parseInt(document.getElementById('syncHour2').value);
+  await fetch('/api/settings/sync-schedule', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sync_hour_1: h1, sync_hour_2: h2})
+  });
+  const status = document.getElementById('syncSchedStatus');
+  status.style.display = 'block';
+  setTimeout(() => { status.style.display = 'none'; }, 2000);
 }
 </script>
 {% endblock %}

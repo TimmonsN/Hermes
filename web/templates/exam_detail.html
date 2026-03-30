@@ -152,6 +152,29 @@
 </div>
 {% endif %}
 
+{% if exam_topics and (exam_topics.weak_areas or exam_topics.upcoming) %}
+<div class="info-block" style="border-color:rgba(248,113,113,0.25);">
+  <h3>Focus Areas for This Exam</h3>
+  {% if exam_topics.weak_areas %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">Review These First — Past Work Below 80%</div>
+  {% for item in exam_topics.weak_areas %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ item.id }}" style="color:var(--text); text-decoration:none;">{{ item.title }}</a>
+    <span style="font-weight:600; color:{% if item.grade_pct >= 70 %}var(--yellow){% else %}var(--red){% endif %}; flex-shrink:0; margin-left:8px;">{{ "%.0f"|format(item.grade_pct) }}%</span>
+  </div>
+  {% endfor %}
+  {% endif %}
+  {% if exam_topics.upcoming %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--accent); margin-top:{% if exam_topics.weak_areas %}12px{% else %}0{% endif %}; margin-bottom:8px;">These Likely Appear on the Exam</div>
+  {% for item in exam_topics.upcoming %}
+  <div style="padding:4px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ item.id }}" style="color:var(--muted); text-decoration:none;">{{ item.title }}</a>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endif %}
+
 {% if e.description %}
 <div class="info-block">
   <h3>Description</h3>
