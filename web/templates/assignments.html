@@ -139,11 +139,13 @@
         <th>Start By</th>
         <th>Progress</th>
         <th>Flags</th>
+        <th></th>
       </tr>
     </thead>
     <tbody id="assignmentsBody">
       {% for a in assignments %}
-      <tr data-title="{{ a.title | lower }}"
+      <tr id="arow-{{ a.id }}"
+          data-title="{{ a.title | lower }}"
           data-course="{{ a.course_name | lower }}"
           data-priority="{{ a.priority }}"
           data-status="{{ a.status }}"
@@ -185,6 +187,11 @@
           {% if a.has_early_bonus %}<span class="tag tag-bonus">bonus</span>{% endif %}
           {% if a.can_resubmit %}<span class="tag tag-bonus">resub</span>{% endif %}
           {% if not a.difficulty %}<span class="tag">analyzing...</span>{% endif %}
+        </td>
+        <td>
+          <button class="btn btn-ghost" id="done-{{ a.id }}"
+                  style="font-size:11px; padding:3px 8px; color:var(--green); border-color:var(--green);"
+                  onclick="markDoneRow('{{ a.id }}', this)">Done</button>
         </td>
       </tr>
       {% endfor %}
@@ -280,6 +287,17 @@ async function bulkMarkDone() {
   );
   await Promise.all(promises);
   location.reload();
+}
+
+async function markDoneRow(id, btn) {
+  await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
+  btn.textContent = 'Done!';
+  btn.disabled = true;
+  btn.style.opacity = '0.4';
+  btn.style.borderColor = 'var(--border)';
+  btn.style.color = 'var(--muted)';
+  const row = document.getElementById('arow-' + id);
+  if (row) row.style.opacity = '0.5';
 }
 </script>
 {% endblock %}

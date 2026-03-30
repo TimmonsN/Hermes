@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %} — Server Error{% endblock %}
+{% block content %}
+<div style="text-align:center; padding:80px 40px; color:var(--muted);">
+  <div style="font-size:72px; font-weight:700; color:var(--border); line-height:1; margin-bottom:16px;">500</div>
+  <div style="font-size:20px; font-weight:600; color:var(--text); margin-bottom:8px;">Something went wrong</div>
+  <div style="font-size:14px; margin-bottom:32px;">Hermes hit an internal error. Check the logs at <code style="color:var(--accent);">logs/hermes.stderr.log</code> for details.</div>
+  <a href="/" class="btn btn-primary">Back to Dashboard</a>
+</div>
+{% endblock %}

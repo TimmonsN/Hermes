@@ -1,6 +1,79 @@
 {% extends "base.html" %}
 {% block title %} — Dashboard{% endblock %}
 
+{% block head %}
+<style>
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 700px) { .dash-grid { grid-template-columns: 1fr; } }
+  .dash-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .dash-card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .focus-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+  }
+  .focus-item:last-child { border-bottom: none; }
+  .focus-item-name { font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-item-meta { font-size: 11px; color: var(--muted); flex-shrink: 0; text-align: right; }
+  .week-at-glance { display: flex; gap: 4px; }
+  .wag-day {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .wag-day-label { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+  .wag-day-date { font-size: 10px; color: var(--muted); }
+  .wag-bar-wrap { width: 100%; background: var(--surface2); border-radius: 3px; height: 36px; display: flex; align-items: flex-end; }
+  .wag-bar { width: 100%; border-radius: 3px 3px 0 0; transition: height 0.3s; }
+  .wag-count { font-size: 9px; color: var(--muted); margin-top: 2px; }
+  .wag-today .wag-day-label { color: var(--accent); }
+  .grade-snap-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .grade-snap-row:last-child { border-bottom: none; }
+  .briefing-text { font-size: 13px; line-height: 1.7; color: var(--text); }
+  .exam-countdown {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .exam-pill {
+    flex: 1;
+    min-width: 120px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .exam-pill-days { font-size: 24px; font-weight: 700; color: var(--yellow); line-height: 1; }
+  .exam-pill-label { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .exam-pill-name { font-size: 12px; font-weight: 500; margin-top: 2px; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
   <h1>Good {{ greeting }}, Niko.</h1>
@@ -38,6 +111,102 @@
     <div class="quick-stat-label">Avg Grade</div>
   </div>
   {% endif %}
+</div>
+
+<!-- 2x2 info grid -->
+<div class="dash-grid">
+  <!-- Today's Focus -->
+  <div class="dash-card">
+    <div class="dash-card-title">Today's Focus</div>
+    {% if top_priority %}
+      {% for a in top_priority %}
+      <div class="focus-item">
+        <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; flex:1; min-width:0; overflow:hidden;">
+          <div class="focus-item-name" title="{{ a.title }}">{{ a.title }}</div>
+          <div style="font-size:11px; color:var(--muted); margin-top:1px;">{{ a.course_name }}</div>
+        </a>
+        <div class="focus-item-meta">
+          <span class="badge badge-{{ a.priority or 'medium' }}" style="display:block; text-align:center; margin-bottom:3px;">{{ a.priority or 'med' }}</span>
+          <span class="{{ a.due_class }}">{{ a.due_fmt or 'no date' }}</span>
+          {% if a.workload_label %}<br><span style="color:{{ a.workload_color }};">{{ a.workload_label }}</span>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Nothing urgent right now.</div>
+    {% endif %}
+  </div>
+
+  <!-- Grade Snapshot -->
+  <div class="dash-card">
+    <div class="dash-card-title">Grade Snapshot</div>
+    {% if grade_snapshot %}
+      {% for g in grade_snapshot %}
+      <div class="grade-snap-row">
+        <span style="font-weight:500;">{{ g.name }}</span>
+        <span style="display:flex; align-items:center; gap:6px;">
+          {% if g.current_avg is not none %}
+          <span style="font-weight:700; color:{% if g.current_avg >= 90 %}var(--green){% elif g.current_avg >= 80 %}var(--yellow){% else %}var(--red){% endif %}">{{ g.current_avg }}%</span>
+          <span style="font-size:10px; color:var(--muted);">{{ g.letter }}</span>
+          {% if not g.on_track %}<span style="font-size:10px; color:var(--red);">below target</span>{% endif %}
+          {% else %}
+          <span style="color:var(--muted); font-style:italic; font-size:11px;">no data</span>
+          {% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Sync Canvas to see grades.</div>
+    {% endif %}
+  </div>
+
+  <!-- This Week at a Glance -->
+  <div class="dash-card">
+    <div class="dash-card-title">This Week at a Glance</div>
+    {% if week_glance %}
+    <div class="week-at-glance">
+      {% for wd in week_glance %}
+      <div class="wag-day {% if wd.is_today %}wag-today{% endif %}">
+        <div class="wag-day-label">{{ wd.label }}</div>
+        <div class="wag-bar-wrap">
+          <div class="wag-bar" style="height:{% if wd.max_h > 0 %}{{ [wd.hours / wd.max_h * 30, 30]|min|int }}px{% else %}2px{% endif %}; background:{% if wd.hours == 0 %}var(--border){% elif wd.hours < 2 %}var(--green){% elif wd.hours < 4 %}var(--yellow){% elif wd.hours < 6 %}var(--orange){% else %}var(--red){% endif %};"></div>
+        </div>
+        {% if wd.count > 0 %}
+        <div class="wag-count">{{ wd.count }}</div>
+        {% else %}
+        <div class="wag-count">&nbsp;</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div style="font-size:10px; color:var(--muted); margin-top:6px; text-align:right;">bar height = estimated hours due</div>
+    {% else %}
+    <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">No upcoming assignments this week.</div>
+    {% endif %}
+  </div>
+
+  <!-- Hermes Briefing / Upcoming Exams -->
+  <div class="dash-card">
+    {% if week_synthesis %}
+    <div class="dash-card-title">Hermes Briefing</div>
+    <div class="briefing-text">{{ week_synthesis }}</div>
+    {% elif upcoming_exams %}
+    <div class="dash-card-title">Upcoming Exams</div>
+    <div class="exam-countdown">
+      {% for e in upcoming_exams[:2] %}
+      <div class="exam-pill" style="border-color:rgba(251,191,36,0.3);">
+        <div class="exam-pill-days">{{ e.days_until }}</div>
+        <div class="exam-pill-label">day{{ 's' if e.days_until != 1 else '' }} away</div>
+        <div class="exam-pill-name">{{ e.title[:30] }}{% if e.title|length > 30 %}…{% endif %}</div>
+        <div style="font-size:10px; color:var(--muted); margin-top:2px;">{{ e.course_name }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="dash-card-title">Hermes Briefing</div>
+    <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Sync Canvas to generate a briefing.</div>
+    {% endif %}
+  </div>
 </div>
 
 <script>

@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %} — Settings{% endblock %}
+
+{% block head %}
+<style>
+  .settings-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .settings-section h3 {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .settings-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    gap: 12px;
+  }
+  .settings-row:last-child { border-bottom: none; }
+  .settings-label { color: var(--muted); flex-shrink: 0; }
+  .settings-value { font-weight: 500; text-align: right; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 6px;
+  }
+  .status-dot.ok { background: var(--green); }
+  .status-dot.warn { background: var(--yellow); }
+  .status-dot.error { background: var(--red); }
+  .course-toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .course-toggle-row:last-child { border-bottom: none; }
+  .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--border);
+    border-radius: 20px;
+    transition: 0.2s;
+  }
+  .toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 14px; width: 14px;
+    left: 3px; bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.2s;
+  }
+  input:checked + .toggle-slider { background: var(--accent); }
+  input:checked + .toggle-slider:before { transform: translateX(16px); }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+<p class="subtitle">Canvas connection, sync schedule, and course visibility</p>
+
+<!-- Canvas Connection -->
+<div class="settings-section">
+  <h3>Canvas Connection</h3>
+  <div class="settings-row">
+    <span class="settings-label">API Token</span>
+    <span class="settings-value">
+      {% if token_display %}
+      <span class="status-dot ok"></span>{{ token_display }}
+      {% else %}
+      <span class="status-dot error"></span>Not configured
+      {% endif %}
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Canvas URL</span>
+    <span class="settings-value">{{ canvas_url or 'Not set' }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Sync</span>
+    <span class="settings-value">{{ last_sync[:16] | replace('T', ' ') if last_sync else 'Never' }}</span>
+  </div>
+  <div style="margin-top:14px;">
+    <button class="btn btn-primary" onclick="triggerSync()" id="syncBtn">Sync Now</button>
+    <span id="syncStatus" style="font-size:12px; color:var(--muted); margin-left:10px;"></span>
+  </div>
+</div>
+
+<!-- Sync Schedule -->
+<div class="settings-section">
+  <h3>Sync Schedule</h3>
+  <div class="settings-row">
+    <span class="settings-label">Automatic sync</span>
+    <span class="settings-value">2:00 PM and 8:00 PM daily (Eastern)</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Daily digest</span>
+    <span class="settings-value">{{ digest_hour }}:05 {{ 'AM' if digest_hour < 12 else 'PM' }}</span>
+  </div>
+  <div style="margin-top:10px; font-size:12px; color:var(--muted);">
+    Sync schedule is configured in <code>.env</code> (DIGEST_HOUR). Hermes restarts apply schedule changes.
+  </div>
+</div>
+
+<!-- Course Visibility -->
+{% if courses %}
+<div class="settings-section">
+  <h3>Course Visibility</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Toggle courses on/off. Hidden courses are excluded from all views and alerts.</p>
+  {% for c in courses %}
+  <div class="course-toggle-row">
+    <div>
+      <span style="font-weight:500;">{{ c.name }}</span>
+      {% if c.code %}<span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ c.code }}</span>{% endif %}
+    </div>
+    <label class="toggle-switch">
+      <input type="checkbox" {% if not c.is_ignored %}checked{% endif %}
+             onchange="toggleCourse('{{ c.id }}', !this.checked)" />
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+async function triggerSync() {
+  const btn = document.getElementById('syncBtn');
+  const status = document.getElementById('syncStatus');
+  btn.textContent = 'Syncing...';
+  btn.disabled = true;
+  status.textContent = 'Sync started...';
+  try {
+    await fetch('/api/sync', {method: 'POST'});
+    status.textContent = 'Sync started in background. Refresh in ~30s.';
+    setTimeout(() => {
+      btn.textContent = 'Sync Now';
+      btn.disabled = false;
+    }, 5000);
+  } catch(e) {
+    status.textContent = 'Error starting sync.';
+    btn.textContent = 'Sync Now';
+    btn.disabled = false;
+  }
+}
+
+async function toggleCourse(courseId, ignored) {
+  await fetch(`/api/course/${courseId}/ignore`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ignored: ignored})
+  });
+}
+</script>
+{% endblock %}

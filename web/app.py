@@ -70,12 +70,45 @@ def _fmt_start_by(start_by_str):
         return None
 
 
+def _calc_priority_score(a: dict, now: datetime = None) -> float:
+    """Calculate smarter priority score for sorting.
+    priority_score = (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_penalty * hours_factor)
+    """
+    if now is None:
+        now = datetime.now()
+    # days_factor: peaks at due date (1.0), drops to 0 at 14+ days out
+    due_at = a.get("due_at")
+    days_factor = 0.5
+    if due_at:
+        try:
+            due_dt = _from_canvas_time(due_at)
+            days_until = (due_dt - now).total_seconds() / 86400
+            days_factor = max(0.0, 1.0 - days_until / 14.0)
+        except Exception:
+            pass
+
+    # grade_impact: points_possible relative to typical (100pts) * group_weight
+    pts = a.get("points_possible") or 10
+    grade_impact = min(1.0, pts / 100.0)  # normalize to 0-1
+
+    # hours_factor: more work = higher priority signal
+    hours = a.get("estimated_hours") or 2.0
+    hours_factor = min(1.0, hours / 10.0)
+
+    urgency_weight = 0.5
+    impact_weight = 0.35
+    effort_weight = 0.15
+
+    return (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_weight * hours_factor)
+
+
 def _enrich_assignment(a: dict) -> dict:
     due_dt, due_fmt, due_class = _fmt_due(a.get("due_at"))
     a["due_fmt"] = due_fmt
     a["due_class"] = due_class
     a["due_dt"] = due_dt
     a["start_by_fmt"] = _fmt_start_by(a.get("start_by"))
+    a["priority_score"] = _calc_priority_score(a)
 
     # Parse analysis_json for extra fields
     if a.get("analysis_json"):
@@ -254,6 +287,66 @@ def dashboard():
     week_hours_logged = round(week_minutes / 60, 1) if week_minutes else 0
     completed_count = db.get_semester_completed_count()
 
+    # --- Today's Focus: top 3 by priority score (descending) ---
+    all_upcoming = sorted(
+        [a for a in assignments if a.get("due_dt")],
+        key=lambda x: x.get("priority_score", 0),
+        reverse=True
+    )
+    top_priority = all_upcoming[:3]
+
+    # --- Grade Snapshot ---
+    grade_snapshot = []
+    for c in courses:
+        cid = c["id"]
+        course_grades = [g for g in all_grades if str(g.get("course_id")) == str(cid)]
+        canvas_grade = c.get("canvas_grade_pct")
+        valid_pcts = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
+        current_avg = round(sum(valid_pcts) / len(valid_pcts), 1) if valid_pcts else None
+        display_avg = canvas_grade if canvas_grade is not None else current_avg
+        target = db.get_grade_goal(cid)
+        grade_snapshot.append({
+            "name": c.get("code") or c["name"][:12],
+            "current_avg": display_avg,
+            "letter": _letter_grade(display_avg),
+            "on_track": (display_avg >= target) if display_avg is not None else None,
+            "target": target,
+        })
+
+    # --- This Week at a Glance (next 7 days) ---
+    week_glance = []
+    max_h = 0
+    for i in range(7):
+        day_date = (now + timedelta(days=i)).date()
+        day_assignments = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == day_date]
+        hours = round(sum(a.get("estimated_hours") or 0 for a in day_assignments), 1)
+        max_h = max(max_h, hours)
+        label = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][day_date.weekday() % 7 if True else 0]
+        label = day_date.strftime("%a")[:3]
+        week_glance.append({
+            "label": label,
+            "date": day_date.strftime("%-d"),
+            "hours": hours,
+            "count": len(day_assignments),
+            "is_today": i == 0,
+            "max_h": 0,  # will be set below
+        })
+    for wd in week_glance:
+        wd["max_h"] = max_h if max_h > 0 else 1
+
+    # --- Upcoming exams with days_until ---
+    for e in upcoming_exams:
+        if e.get("start_at"):
+            try:
+                exam_dt = _from_canvas_time(e["start_at"])
+                e["days_until"] = max(0, (exam_dt.date() - now.date()).days)
+            except Exception:
+                e["days_until"] = 0
+        else:
+            e["days_until"] = 0
+
+    week_synthesis = db.get_pref("week_synthesis") or ""
+
     return render_template("dashboard.html",
         greeting=greeting,
         today_str=now.strftime("%A, %B %d"),
@@ -270,6 +363,10 @@ def dashboard():
         avg_grade=avg_grade,
         week_hours_logged=week_hours_logged,
         completed_count=completed_count,
+        top_priority=top_priority,
+        grade_snapshot=grade_snapshot,
+        week_glance=week_glance,
+        week_synthesis=week_synthesis,
     )
 
 
@@ -356,6 +453,19 @@ def calendar_page():
         else:
             return "heat-overwhelming", 22
 
+    def _hours_heat_class(total_hours):
+        """Color heat bar based on total estimated hours due on the day."""
+        if total_hours == 0:
+            return "heat-none", 3
+        elif total_hours < 2:
+            return "heat-light", 5
+        elif total_hours < 4:
+            return "heat-moderate", 9
+        elif total_hours < 6:
+            return "heat-heavy", 14
+        else:
+            return "heat-overwhelming", 20
+
     days_since_sunday = today.isoweekday() % 7
     week_start = today - timedelta(days=days_since_sunday)
 
@@ -381,7 +491,7 @@ def calendar_page():
             total_hours = sum(a.get("estimated_hours") or 0 for a in day_assignments)
             week_total_hours += total_hours
             intensity, contributors = _heatmap_pressure(day_date)
-            heat_class, heat_height = _heatmap_level(intensity)
+            heat_class, heat_height = _hours_heat_class(total_hours)
             week.append({
                 "day_name": day_name,
                 "date_str": day_date.strftime("%b %-d"),
@@ -805,6 +915,11 @@ def mark_done(assignment_id):
     db.update_assignment_status(assignment_id, "submitted")
     return jsonify({"status": "ok"})
 
+@app.route("/api/assignment/<assignment_id>/mark-done", methods=["POST"])
+def mark_done_alias(assignment_id):
+    db.update_assignment_status(assignment_id, "submitted")
+    return jsonify({"status": "ok"})
+
 @app.route("/api/assignment/<assignment_id>/difficulty", methods=["POST"])
 def set_difficulty(assignment_id):
     data = request.get_json()
@@ -1054,28 +1169,108 @@ def toggle_course_ignore(course_id):
 
 @app.route("/study-plan")
 def study_plan_page():
-    from config import Config
+    import math
+    from collections import defaultdict
     plan = db.get_study_plan()
 
-    # Group by date
-    from collections import defaultdict
+    # Group saved plan entries by date
     by_date = defaultdict(list)
     for entry in plan:
         by_date[entry["date"]].append(entry)
 
     now = datetime.now()
+    assignments_raw = db.get_upcoming_assignments(days_ahead=14)
+    assignments_sp = [_enrich_assignment(a) for a in assignments_raw]
+    exams_sp = db.get_upcoming_exams(days_ahead=14)
+
     days_list = []
-    for i in range(14):
+    for i in range(7):
         day_date = (now + timedelta(days=i)).date()
         date_str = day_date.isoformat()
         entries = by_date.get(date_str, [])
-        total = round(sum(e.get("hours_planned", 0) for e in entries), 1)
+
+        # Assignments due that day
+        due_this_day = [a for a in assignments_sp if a.get("due_dt") and a["due_dt"].date() == day_date]
+
+        # Assignments to START working on today (due_date minus ceil(hours/3) days)
+        start_today = []
+        for a in assignments_sp:
+            if not a.get("due_dt"):
+                continue
+            if a["due_dt"].date() == day_date:
+                continue  # already in due_this_day
+            est_hours = a.get("estimated_hours") or 2.0
+            days_to_start_before = math.ceil(est_hours / 3)
+            ideal_start = a["due_dt"].date() - timedelta(days=days_to_start_before)
+            if ideal_start == day_date:
+                start_today.append(a)
+
+        # Exams due that day
+        exams_today = []
+        for e in exams_sp:
+            if e.get("start_at"):
+                try:
+                    exam_dt = _from_canvas_time(e["start_at"])
+                    if exam_dt.date() == day_date:
+                        exams_today.append(e)
+                except Exception:
+                    pass
+
+        # Exams within 7 days — note when to start studying
+        exam_study_reminders = []
+        for e in exams_sp:
+            if e.get("start_at"):
+                try:
+                    exam_dt = _from_canvas_time(e["start_at"])
+                    days_away = (exam_dt.date() - day_date).days
+                    if 0 < days_away <= 7:
+                        study_hours = 6  # default
+                        if e.get("analysis_json"):
+                            try:
+                                ea = json.loads(e["analysis_json"])
+                                study_hours = ea.get("study_hours", 6)
+                            except Exception:
+                                pass
+                        days_needed = math.ceil(study_hours / 3)
+                        start_day = exam_dt.date() - timedelta(days=days_needed)
+                        if start_day == day_date:
+                            exam_study_reminders.append({
+                                "title": e["title"],
+                                "course_name": e.get("course_name", ""),
+                                "days_away": days_away,
+                                "days_needed": days_needed,
+                            })
+                except Exception:
+                    pass
+
+        total_hours = round(sum(e.get("hours_planned", 0) for e in entries), 1)
+        # Urgency color based on hours due that day
+        due_hours = round(sum(a.get("estimated_hours") or 0 for a in due_this_day), 1)
+        if due_hours == 0:
+            urgency_color = "var(--green)"
+            urgency_label = "free"
+        elif due_hours < 3:
+            urgency_color = "var(--yellow)"
+            urgency_label = f"{due_hours}h due"
+        elif due_hours < 6:
+            urgency_color = "var(--orange)"
+            urgency_label = f"{due_hours}h due"
+        else:
+            urgency_color = "var(--red)"
+            urgency_label = f"{due_hours}h due"
+
         days_list.append({
             "date_str": date_str,
             "date_fmt": day_date.strftime("%A, %b %-d"),
             "is_today": i == 0,
             "entries": entries,
-            "total_hours": total,
+            "total_hours": total_hours,
+            "due_this_day": due_this_day,
+            "start_today": start_today,
+            "exams_today": exams_today,
+            "exam_study_reminders": exam_study_reminders,
+            "urgency_color": urgency_color,
+            "urgency_label": urgency_label,
         })
 
     has_plan = bool(plan)
@@ -1213,6 +1408,61 @@ def alerts_page():
                     "message": f"Submit '{a['title']}' in the next ~{int(hours - 24)}h to earn bonus points.",
                     "assignment_id": a["id"],
                 })
+
+    # Due in <24h and not submitted
+    for a in assignments:
+        if a.get("due_dt") and a.get("status", "pending") not in ("submitted", "complete"):
+            hours = (a["due_dt"] - now).total_seconds() / 3600
+            if 0 < hours < 24:
+                # Avoid duplicate with "Unstarted assignments due within 30h"
+                already = any(al.get("assignment_id") == a["id"] for al in alerts)
+                if not already:
+                    alerts.append({
+                        "level": "danger", "icon": "clock",
+                        "title": f"Due in {int(hours)}h",
+                        "message": f"'{a['title']}' ({a.get('course_name','')}) is due in less than 24 hours and is not marked as submitted.",
+                        "assignment_id": a["id"],
+                    })
+
+    # Courses below target grade
+    courses_all = db.get_courses()
+    all_grades_for_alert = db.get_all_grades()
+    for c in courses_all:
+        cid = c["id"]
+        canvas_grade = c.get("canvas_grade_pct")
+        if canvas_grade is None:
+            course_grades = [g for g in all_grades_for_alert if str(g.get("course_id")) == str(cid)]
+            valid = [g["grade_pct"] for g in course_grades if g.get("grade_pct") is not None]
+            display_avg = round(sum(valid) / len(valid), 1) if valid else None
+        else:
+            display_avg = canvas_grade
+        target = db.get_grade_goal(cid)
+        if display_avg is not None and display_avg < target:
+            gap = round(target - display_avg, 1)
+            alerts.append({
+                "level": "warning", "icon": "grades",
+                "title": f"{c.get('code') or c['name']} below target",
+                "message": f"Current grade is {display_avg}% — {gap}% below your {target}% target. Check the Grades page for what score you need on the final.",
+                "assignment_id": None,
+            })
+
+    # Upcoming exams in <3 days
+    for e in exams:
+        if e.get("start_at"):
+            try:
+                exam_dt = _from_canvas_time(e["start_at"])
+                days = (exam_dt - now).days
+                if 0 <= days < 3:
+                    already = any(al.get("icon") == "exam" and e["title"] in al.get("message", "") for al in alerts)
+                    if not already:
+                        alerts.append({
+                            "level": "danger", "icon": "exam",
+                            "title": f"Exam {'tomorrow' if days == 1 else 'today' if days == 0 else 'in 2 days'}",
+                            "message": f"{e['title']} ({e.get('course_name','')}) is {'today' if days == 0 else 'in ' + str(days) + ' day' + ('s' if days != 1 else '')}. Stop reading alerts and start reviewing.",
+                            "assignment_id": None,
+                        })
+            except Exception:
+                pass
 
     if not alerts:
         alerts = []  # empty state handled in template
@@ -1400,6 +1650,41 @@ def roi_page():
         resub_ops=resub_ops,
         ec_ops=ec_ops,
         skip_candidates=skip_candidates,
+    )
+
+
+@app.errorhandler(404)
+def not_found(e):
+    try:
+        return render_template("404.html"), 404
+    except Exception:
+        return "<h1>404 — Page not found</h1>", 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    logger.error(f"500 error: {e}")
+    try:
+        return render_template("500.html"), 500
+    except Exception:
+        return "<h1>500 — Server error</h1>", 500
+
+
+@app.route("/settings")
+def settings_page():
+    from config import Config as _Cfg
+    last_sync = db.get_pref("last_sync_time")
+    token_display = None
+    if _Cfg.CANVAS_TOKEN:
+        t = _Cfg.CANVAS_TOKEN
+        token_display = t[:6] + "..." + t[-4:] if len(t) > 10 else "set"
+    courses = db.get_courses(include_ignored=True)
+    return render_template("settings.html",
+        last_sync=last_sync,
+        token_display=token_display,
+        canvas_url=getattr(_Cfg, "CANVAS_BASE_URL", ""),
+        courses=courses,
+        digest_hour=getattr(_Cfg, "DIGEST_HOUR", 8),
     )
 
 

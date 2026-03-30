@@ -79,7 +79,7 @@
 <div class="plan-header-row">
   <div>
     <h1>Study Plan</h1>
-    <p class="subtitle">14-day schedule based on your assignments and exams</p>
+    <p class="subtitle">7-day breakdown — assignments due, what to start, exams coming up</p>
   </div>
   <button class="btn btn-primary" onclick="generatePlan()" id="genBtn">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -96,15 +96,73 @@
 {% else %}
 
 {% for day in days_list %}
-<div class="plan-day {% if day.is_today %}today-day{% endif %} {% if not day.entries %}empty-day{% endif %}">
+<div class="plan-day {% if day.is_today %}today-day{% endif %} {% if not day.due_this_day and not day.start_today and not day.exams_today and not day.exam_study_reminders and not day.entries %}empty-day{% endif %}">
   <div class="plan-day-header">
-    <div class="plan-day-name">
+    <div class="plan-day-name" style="color:{{ day.urgency_color }};">
       {% if day.is_today %}Today — {% endif %}{{ day.date_fmt }}
     </div>
-    {% if day.entries %}
-    <div class="plan-day-total">{{ day.total_hours }}h planned</div>
-    {% endif %}
+    <div style="display:flex; align-items:center; gap:10px;">
+      {% if day.urgency_label != 'free' %}
+      <span style="font-size:11px; color:{{ day.urgency_color }}; font-weight:600;">{{ day.urgency_label }}</span>
+      {% endif %}
+      {% if day.entries %}
+      <div class="plan-day-total">{{ day.total_hours }}h planned</div>
+      {% endif %}
+    </div>
   </div>
+
+  {% if day.exams_today %}
+    {% for e in day.exams_today %}
+    <div class="plan-entry" style="background:rgba(251,191,36,0.07); border-left:3px solid var(--yellow);">
+      <div class="plan-entry-note">
+        <span style="color:var(--yellow); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px;">EXAM TODAY</span>
+        <br>
+        <strong>{{ e.title }}</strong>
+        <span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ e.course_name }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if day.exam_study_reminders %}
+    {% for r in day.exam_study_reminders %}
+    <div class="plan-entry" style="background:rgba(251,191,36,0.04); border-left:3px solid rgba(251,191,36,0.4);">
+      <div class="plan-entry-note">
+        <span style="color:var(--yellow); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px;">Start Studying Today</span>
+        <br>
+        {{ r.title }} ({{ r.course_name }}) — exam in {{ r.days_away }} day{{ 's' if r.days_away != 1 else '' }}, need ~{{ r.days_needed }} days to prep
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if day.due_this_day %}
+    {% for a in day.due_this_day %}
+    <div class="plan-entry" style="border-left:3px solid var(--red);">
+      <div class="plan-entry-note">
+        <span style="color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:0.4px;">DUE — {{ a.course_name }}</span>
+        <br>
+        <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ a.title }}</a>
+      </div>
+      <div class="plan-entry-hours" style="color:var(--red);">{{ a.estimated_hours or '?' }}h</div>
+    </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if day.start_today %}
+    {% for a in day.start_today %}
+    <div class="plan-entry" style="border-left:3px solid var(--accent);">
+      <div class="plan-entry-note">
+        <span style="color:var(--accent); font-size:11px; text-transform:uppercase; letter-spacing:0.4px;">Start Today — {{ a.course_name }}</span>
+        <br>
+        <a href="/assignments/{{ a.id }}" style="color:var(--muted); text-decoration:none;">{{ a.title }}</a>
+        <span style="color:var(--muted); font-size:11px; margin-left:6px;">due {{ a.due_fmt }}</span>
+      </div>
+      <div class="plan-entry-hours" style="color:var(--accent);">~{{ a.estimated_hours or '?' }}h total</div>
+    </div>
+    {% endfor %}
+  {% endif %}
+
   {% if day.entries %}
     {% for entry in day.entries %}
     <div class="plan-entry">
@@ -115,15 +173,15 @@
         {% endif %}
         {{ entry.title or entry.note }}
         {% if entry.due_at %}
-        <span style="color:var(--muted); font-size:11px; margin-left:8px;">due
-          {% set due = entry.due_at[:10] %}{{ due }}
-        </span>
+        <span style="color:var(--muted); font-size:11px; margin-left:8px;">due {{ entry.due_at[:10] }}</span>
         {% endif %}
       </div>
       <div class="plan-entry-hours">{{ entry.hours_planned }}h</div>
     </div>
     {% endfor %}
-  {% else %}
+  {% endif %}
+
+  {% if not day.due_this_day and not day.start_today and not day.exams_today and not day.exam_study_reminders and not day.entries %}
     <div class="plan-empty">Nothing scheduled — free day</div>
   {% endif %}
 </div>
