@@ -395,6 +395,7 @@ Each object must have these fields:
   "course_strategy_note": "one sentence on how this fits into the course grade",
   "task_sections": ["specific subtask 1 (est time)", "subtask 2 (est time)"],
   "course_weight_context": "one sentence: what % of final grade this is worth and whether it's high/low stakes relative to the course",
+  "study_strategy": "3-5 sentence specific action plan: what to review first, which course materials or lecture topics to focus on, how to approach the problem type, and the single most common mistake to avoid on this specific assignment type",
   "reasoning": "2-3 calm, factual sentences explaining difficulty and time estimate"
 }}
 
@@ -704,9 +705,15 @@ Return:
   "days_to_start_studying": integer,
   "daily_study_hours": float,
   "priority": "medium|high|critical",
-  "study_tips": ["tip1", "tip2"],
+  "study_tips": ["tip1", "tip2", "tip3"],
+  "daily_study_plan": [
+    {{"day": 1, "focus": "Review [specific topic], skim lecture notes on [topic]", "hours": 1.5}},
+    {{"day": 2, "focus": "Practice problems from [specific topic], review weak areas", "hours": 2.0}}
+  ],
   "reasoning": "brief explanation"
 }}
+
+For daily_study_plan: generate one entry per study day (up to days_to_start_studying days). Each focus should be specific to this course/exam — reference actual topics if known from the description or course. If description gives no topics, reference general exam prep strategies for the subject.
 
 Return ONLY valid JSON, no markdown."""
 
