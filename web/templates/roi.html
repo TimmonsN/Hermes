@@ -60,10 +60,13 @@
       <div>
         <div class="roi-impact" style="color:var(--green);">
           {% if r.grade_impact %}+{{ r.grade_impact }}%{% else %}—{% endif %}
+          <span style="font-size:13px; font-weight:400; color:var(--muted);">final</span>
         </div>
         <div class="roi-meta">
-          current: {{ r.current_pct }}%
-          ({{ r.points_earned }}/{{ r.points_possible }} pts)
+          current: {{ r.current_pct }}% ({{ r.points_earned }}/{{ r.points_possible }} pts)
+        </div>
+        <div class="roi-meta" style="color:var(--green);">
+          can recover up to +{{ (r.points_possible - r.points_earned)|round(1) }} pts
         </div>
       </div>
     </div>

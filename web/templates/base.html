@@ -177,6 +177,15 @@
     .card { transition: border-color 0.15s, transform 0.15s; }
     .card:hover { border-color: var(--accent-dim); }
 
+    /* Tablet layout */
+    @media (max-width: 900px) {
+      .main { padding: 20px; }
+      .grid-2 { grid-template-columns: 1fr; }
+      .grid-3 { grid-template-columns: 1fr 1fr; }
+      .quick-stats { flex-wrap: wrap; }
+      .quick-stat { flex: 1 0 33%; }
+    }
+
     /* Mobile nav */
     @media (max-width: 640px) {
       .sidebar {

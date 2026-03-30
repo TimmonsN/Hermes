@@ -1013,6 +1013,55 @@ def assignment_detail(assignment_id):
         except Exception:
             pass
 
+    # Hours until due (negative = overdue)
+    hrs_until_due = None
+    try:
+        if a.get("due_at"):
+            _hud_dt = _from_canvas_time(a["due_at"])
+            hrs_until_due = (_hud_dt - datetime.now()).total_seconds() / 3600
+    except Exception:
+        pass
+
+    # Late policy for this assignment's course
+    late_policy_accepted = None
+    late_policy_reason = ""
+    try:
+        _lpa, _lpr = _late_policy_for_course(str(a.get("course_id", "")))
+        late_policy_accepted = _lpa
+        late_policy_reason = _lpr
+    except Exception:
+        pass
+
+    # Compute what score is needed on this assignment to stay on track for course target
+    needed_on_assignment = None
+    course_target = None
+    try:
+        if a.get("course_id") and a.get("points_possible") and not grade_obj:
+            _cid = str(a["course_id"])
+            course_target = db.get_grade_goal(_cid)
+            _canvas_grade = None
+            _c_row = db.get_course_by_id(_cid)
+            if _c_row:
+                _canvas_grade = _c_row.get("canvas_grade_pct")
+            _all_cg = db.get_grades_for_course(_cid)
+            if _canvas_grade is not None:
+                _cur_avg = _canvas_grade
+            elif _all_cg:
+                _valid = [g["grade_pct"] for g in _all_cg if g.get("grade_pct") is not None]
+                _cur_avg = round(sum(_valid) / len(_valid), 1) if _valid else None
+            else:
+                _cur_avg = None
+            # Simplified: if this assignment is X% of the final grade, what score on it keeps us at target?
+            # needed_score = (target - cur_avg * (1 - impact)) / impact * 100 (solve for assignment score)
+            if grade_impact_pct and _cur_avg is not None and grade_impact_pct > 0:
+                _impact_frac = grade_impact_pct / 100.0
+                _needed = ((course_target / 100.0) - (_cur_avg / 100.0) * (1.0 - _impact_frac)) / _impact_frac * 100.0
+                needed_on_assignment = round(_needed, 1)
+                if needed_on_assignment > 100 or needed_on_assignment < 0:
+                    needed_on_assignment = None  # not meaningful
+    except Exception:
+        pass
+
     return render_template(
         "assignment_detail.html",
         a=a,
@@ -1037,6 +1086,12 @@ def assignment_detail(assignment_id):
         relevant_announcements=relevant_announcements,
         office_hours=office_hours,
         days_until=days_until,
+        late_policy_accepted=late_policy_accepted,
+        late_policy_reason=late_policy_reason,
+        needed_on_assignment=needed_on_assignment,
+        course_target=course_target,
+        now=datetime.now(),
+        hrs_until_due=hrs_until_due,
     )
 
 
@@ -1059,10 +1114,28 @@ def assignments_page():
     assignments = [a for a in all_enriched if a.get("status") not in ("submitted", "complete")
                    and a.get("due_dt") and a["due_dt"] > now - timedelta(hours=1)]
 
-    # Attach checklist stats for completion % display
+    # Attach checklist stats for completion % display (batch fetch to avoid N+1)
+    assignment_ids = [a["id"] for a in assignments]
+    if assignment_ids:
+        with db._connect() as _cl_conn:
+            placeholders = ",".join("?" * len(assignment_ids))
+            cl_rows = _cl_conn.execute(
+                f"SELECT assignment_id, COUNT(*) as total, SUM(is_done) as done "
+                f"FROM assignment_checklist WHERE assignment_id IN ({placeholders}) GROUP BY assignment_id",
+                assignment_ids
+            ).fetchall()
+        checklist_stats_map = {
+            r["assignment_id"]: {
+                "total": r["total"] or 0,
+                "done": r["done"] or 0,
+                "pct": round((r["done"] or 0) / r["total"] * 100) if r["total"] else 0
+            }
+            for r in cl_rows
+        }
+    else:
+        checklist_stats_map = {}
     for a in assignments:
-        stats = db.get_checklist_stats(a["id"])
-        a["checklist_stats"] = stats
+        a["checklist_stats"] = checklist_stats_map.get(a["id"], {"total": 0, "done": 0, "pct": 0})
 
     courses = db.get_courses()
     course_names = sorted(set(a["course_name"] for a in all_enriched if a.get("course_name")))
@@ -1242,15 +1315,21 @@ def exam_detail(exam_id):
 @app.route("/courses")
 def courses_page():
     courses_raw = db.get_courses()
+    # Pre-fetch all upcoming assignments once (avoid N+1 in per-course loop below)
+    _all_upcoming_for_courses = db.get_upcoming_assignments(days_ahead=90)
+    _upcoming_by_course = {}
+    for _a in _all_upcoming_for_courses:
+        _cid = str(_a.get("course_id", ""))
+        _upcoming_by_course.setdefault(_cid, []).append(_a)
+
     enriched = []
     for c in courses_raw:
         course = dict(c)
         syllabi = db.get_syllabus(c["id"])
         course["has_syllabus"] = len(syllabi) > 0
 
-        # Count assignments
-        assignments = db.get_upcoming_assignments(days_ahead=90)
-        course["assignment_count"] = sum(1 for a in assignments if a.get("course_id") == c["id"])
+        # Count assignments (use pre-fetched data)
+        course["assignment_count"] = len(_upcoming_by_course.get(str(c["id"]), []))
 
         # Get rules from syllabus
         course["early_bonus"] = None
@@ -1538,7 +1617,9 @@ def reanalyze_all():
         except Exception:
             pass
         db.set_pref("reanalyze_status", "done")
-        db.set_pref("reanalyze_finished", datetime.now().isoformat())
+        _now_iso = datetime.now().isoformat()
+        db.set_pref("reanalyze_finished", _now_iso)
+        db.set_pref("last_analysis_time", _now_iso)
     try:
         t = threading.Thread(target=_run_sync_and_finish, daemon=True)
         t.start()
@@ -1676,10 +1757,14 @@ def grades_page():
             total_pts = sum((a.get("points_possible") or 0) for a in group_assignments if (a.get("points_possible") or 0) > 0)
             graded_earned = sum(
                 (gr.get("points_earned") or 0) if (gr.get("points_earned") or 0) > 0
-                else ((gr.get("grade_pct") or 0) / 100.0 * (gr.get("a_points_possible") or 0))
+                else ((gr.get("grade_pct") or 0) / 100.0 * (gr.get("a_points_possible") or gr.get("points_possible") or 0))
                 for gr in graded
             )
-            graded_possible = sum(gr.get("points_possible", 0) or gr.get("a_points_possible", 0) or 0 for gr in graded)
+            # graded_possible = sum of points_possible for graded assignments (use a_points_possible from JOIN)
+            graded_possible = sum(
+                (gr.get("a_points_possible") or gr.get("points_possible") or 0)
+                for gr in graded
+            )
             ungraded_assignments = [a for a in group_assignments if a["id"] not in graded_ids]
             ungraded_pts = sum((a.get("points_possible") or 0) for a in ungraded_assignments)
 
@@ -1700,10 +1785,28 @@ def grades_page():
                 final_group = g["name"]
                 final_weight = g["weight"] / 100.0
 
-        if final_weight and display_avg is not None and final_weight > 0:
-            current_weight = 1.0 - final_weight
-            needed_on_final = round((target - display_avg * current_weight) / final_weight, 1)
-            needed_on_final = min(needed_on_final, 200)  # cap at 200% to avoid absurd numbers
+        if final_weight and final_weight > 0:
+            # Compute weighted average of all non-final categories to get current standing
+            non_final_weighted_sum = 0.0
+            non_final_weight_sum = 0.0
+            for cat in category_grades:
+                if not cat["is_final"] and cat["current_pct"] is not None and cat["weight"] > 0:
+                    non_final_weighted_sum += cat["current_pct"] * (cat["weight"] / 100.0)
+                    non_final_weight_sum += cat["weight"] / 100.0
+            # If we have non-final category data, use that; otherwise fall back to display_avg
+            if non_final_weight_sum > 0:
+                current_non_final_avg = non_final_weighted_sum / non_final_weight_sum
+            elif display_avg is not None:
+                current_non_final_avg = display_avg
+            else:
+                current_non_final_avg = None
+
+            if current_non_final_avg is not None:
+                current_weight = 1.0 - final_weight
+                needed_on_final = round((target - current_non_final_avg * current_weight) / final_weight, 1)
+                needed_on_final = min(needed_on_final, 200)  # cap at 200% to avoid absurd numbers
+            else:
+                needed_on_final = None
         else:
             needed_on_final = None
             final_weight = 0
@@ -2128,13 +2231,13 @@ def alerts_page():
             if not already:
                 alerts.append({
                     "level": "warning",
-                    "icon": "grade",
+                    "icon": "grades",
                     "title": f"Low Grade: {g.get('title', 'Assignment')}",
                     "message": f"You received {g['grade_pct']:.1f}% on {g.get('title','')} ({g.get('course_name','')}).",
                     "assignment_id": g.get("assignment_id"),
                 })
 
-    # Courses below target grade
+    # Courses below target grade — with computed needed-on-final if possible
     courses_all = db.get_courses()
     for c in courses_all:
         cid = c["id"]
@@ -2148,10 +2251,43 @@ def alerts_page():
         target = db.get_grade_goal(cid)
         if display_avg is not None and display_avg < target:
             gap = round(target - display_avg, 1)
+            # Try to compute needed-on-final score
+            needed_msg = ""
+            try:
+                alert_groups = db.get_assignment_groups(cid)
+                alert_course_asgns = db.get_all_assignments_for_course(cid)
+                for ag in alert_groups:
+                    gname_l = ag["name"].lower()
+                    if ("final" in gname_l or "exam" in gname_l) and ag["weight"] > 0:
+                        fw = ag["weight"] / 100.0
+                        # Compute non-final weighted avg
+                        nf_sum, nf_w = 0.0, 0.0
+                        for ag2 in alert_groups:
+                            if ag2["canvas_group_id"] == ag["canvas_group_id"]:
+                                continue
+                            if ag2["weight"] <= 0:
+                                continue
+                            g_ids = {a["id"] for a in alert_course_asgns if a.get("canvas_group_id") == ag2["canvas_group_id"]}
+                            g_pcts = [g["grade_pct"] for g in all_grades_for_alert if g.get("assignment_id") in g_ids and g.get("grade_pct") is not None]
+                            if g_pcts:
+                                nf_sum += (sum(g_pcts) / len(g_pcts)) * (ag2["weight"] / 100.0)
+                                nf_w += ag2["weight"] / 100.0
+                        if nf_w > 0:
+                            cnf = nf_sum / nf_w
+                            nof = round((target - cnf * (1 - fw)) / fw, 1)
+                            if nof <= 100:
+                                needed_msg = f" You need {nof}% on the final to recover."
+                            elif nof <= 115:
+                                needed_msg = f" You'd need {nof}% on the final — tough but possible with extra credit."
+                            else:
+                                needed_msg = f" The target may be out of reach without extra credit."
+                        break
+            except Exception:
+                pass
             alerts.append({
                 "level": "warning", "icon": "grades",
                 "title": f"{c.get('code') or c['name']} below target",
-                "message": f"Current grade is {display_avg}% — {gap}% below your {target}% target. Check the Grades page for what score you need on the final.",
+                "message": f"Current grade is {display_avg}% — {gap}% below your {target}% target.{needed_msg}",
                 "assignment_id": None,
             })
 
@@ -2397,6 +2533,8 @@ def server_error(e):
 def settings_page():
     from config import Config as _Cfg
     last_sync = db.get_pref("last_sync_time")
+    last_analysis = db.get_pref("last_analysis_time")
+    last_piazza_sync = db.get_pref("last_piazza_sync")
     token_display = None
     if _Cfg.CANVAS_TOKEN:
         t = _Cfg.CANVAS_TOKEN
@@ -2404,15 +2542,30 @@ def settings_page():
     courses = db.get_courses(include_ignored=True)
     sync_hour_1 = int(db.get_pref("sync_hour_1") or 14)
     sync_hour_2 = int(db.get_pref("sync_hour_2") or 20)
+    piazza_nid = _Cfg.PIAZZA_NETWORK_ID or db.get_pref("piazza_network_id") or ""
+    piazza_email = _Cfg.PIAZZA_EMAIL or ""
     return render_template("settings.html",
         last_sync=last_sync,
+        last_analysis=last_analysis,
+        last_piazza_sync=last_piazza_sync,
         token_display=token_display,
         canvas_url=getattr(_Cfg, "CANVAS_BASE_URL", ""),
         courses=courses,
         digest_hour=getattr(_Cfg, "DIGEST_HOUR", 8),
         sync_hour_1=sync_hour_1,
         sync_hour_2=sync_hour_2,
+        piazza_nid=piazza_nid,
+        piazza_email=piazza_email,
     )
+
+
+@app.route("/api/settings/piazza", methods=["POST"])
+def save_piazza_settings():
+    data = request.get_json(force=True, silent=True) or {}
+    nid = (data.get("piazza_nid") or "").strip()
+    if nid:
+        db.set_pref("piazza_network_id", nid)
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/settings/sync-schedule", methods=["POST"])

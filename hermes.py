@@ -434,10 +434,11 @@ def _sync_piazza(courses):
     Auto-maps the env PIAZZA_NETWORK_ID to the matching course if piazza_nid
     isn't set yet.
     """
-    if not piazza_client.is_configured():
+    # Config.PIAZZA_NETWORK_ID from .env, fall back to db pref set via Settings UI
+    nid = Config.PIAZZA_NETWORK_ID or db.get_pref("piazza_network_id") or ""
+    # Need email+password configured, and at least one nid source
+    if not (Config.PIAZZA_EMAIL and Config.PIAZZA_PASSWORD and nid):
         return
-
-    nid = Config.PIAZZA_NETWORK_ID
 
     # Find which course this network belongs to
     target_course = None
@@ -501,6 +502,7 @@ def _sync_piazza(courses):
                 db.upsert_syllabus(cid, fname, new_hash, truncated, {})
                 materials_stored += 1
 
+    db.set_pref("last_piazza_sync", datetime.now().isoformat())
     logger.info(f"Piazza sync for {cname}: {instructors_notes} announcements, {materials_stored} new/updated posts")
 
 

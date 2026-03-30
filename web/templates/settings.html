@@ -98,13 +98,41 @@
     <span class="settings-value">{{ canvas_url or 'Not set' }}</span>
   </div>
   <div class="settings-row">
-    <span class="settings-label">Last Sync</span>
+    <span class="settings-label">Last Canvas Sync</span>
     <span class="settings-value">{{ last_sync[:16] | replace('T', ' ') if last_sync else 'Never' }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Analysis</span>
+    <span class="settings-value">{{ last_analysis[:16] | replace('T', ' ') if last_analysis else 'Never' }}</span>
   </div>
   <div style="margin-top:14px;">
     <button class="btn btn-primary" onclick="triggerSync()" id="syncBtn">Sync Now</button>
     <span id="syncStatus" style="font-size:12px; color:var(--muted); margin-left:10px;"></span>
   </div>
+</div>
+
+<!-- Piazza Integration -->
+<div class="settings-section">
+  <h3>Piazza Integration</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Piazza posts are pulled automatically when Hermes syncs. Configure your network ID here to match course discussion threads to assignments.</p>
+  <div class="settings-row">
+    <span class="settings-label">Account</span>
+    <span class="settings-value">{{ piazza_email if piazza_email else '<span style="color:var(--muted); font-style:italic;">Not configured in .env</span>' | safe }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Network ID</span>
+    <span class="settings-value">
+      <input type="text" id="piazzaNid" value="{{ piazza_nid }}"
+             placeholder="e.g. ly1234abcde"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:13px; padding:4px 10px; border-radius:6px; width:180px; font-family:inherit;"
+             oninput="savePiazzaNid(this.value)" />
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Piazza Sync</span>
+    <span class="settings-value">{{ last_piazza_sync[:16] | replace('T', ' ') if last_piazza_sync else 'Never' }}</span>
+  </div>
+  <div id="piazzaSaveStatus" style="font-size:12px; color:var(--green); margin-top:6px; display:none;">Saved. Hermes will use this Network ID on the next sync.</div>
 </div>
 
 <!-- Sync Schedule -->
@@ -201,6 +229,21 @@ async function saveSyncSchedule() {
   const status = document.getElementById('syncSchedStatus');
   status.style.display = 'block';
   setTimeout(() => { status.style.display = 'none'; }, 2000);
+}
+
+let _piazzaTimer = null;
+function savePiazzaNid(nid) {
+  clearTimeout(_piazzaTimer);
+  _piazzaTimer = setTimeout(async () => {
+    await fetch('/api/settings/piazza', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({piazza_nid: nid})
+    });
+    const status = document.getElementById('piazzaSaveStatus');
+    status.style.display = 'block';
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+  }, 800);
 }
 </script>
 {% endblock %}

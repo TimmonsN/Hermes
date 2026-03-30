@@ -311,6 +311,42 @@
   {% endif %}
 </div>
 
+<!-- Deadline urgency banner (only for pending/overdue assignments) -->
+{% if a.status not in ('submitted', 'complete') and a.due_fmt and hrs_until_due is not none %}
+  {% if hrs_until_due < 0 %}
+  <div style="background:rgba(248,113,113,0.12); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:12px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+    <div>
+      <span style="color:var(--red); font-weight:700; font-size:14px;">OVERDUE</span>
+      <span style="color:var(--muted); font-size:13px; margin-left:10px;">Was due {{ a.due_fmt }}</span>
+    </div>
+    {% if late_policy_accepted is not none %}
+      {% if late_policy_accepted %}
+      <span style="color:var(--yellow); font-size:12px; font-weight:600;">Late submission may be accepted — {{ late_policy_reason }}</span>
+      {% else %}
+      <span style="color:var(--red); font-size:12px;">Hermes determined late submissions are not accepted for this course.</span>
+      {% endif %}
+    {% else %}
+    <span style="color:var(--muted); font-size:12px;">Late policy not found in syllabus — check with instructor.</span>
+    {% endif %}
+  </div>
+  {% elif hrs_until_due <= 48 %}
+  <div style="background:{% if hrs_until_due < 6 %}rgba(248,113,113,0.12){% elif hrs_until_due < 24 %}rgba(251,146,60,0.10){% else %}rgba(251,191,36,0.08){% endif %}; border:1px solid {% if hrs_until_due < 6 %}rgba(248,113,113,0.4){% elif hrs_until_due < 24 %}rgba(251,146,60,0.4){% else %}rgba(251,191,36,0.3){% endif %}; border-radius:10px; padding:12px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+    <div>
+      <span style="color:{% if hrs_until_due < 6 %}var(--red){% elif hrs_until_due < 24 %}var(--orange){% else %}var(--yellow){% endif %}; font-weight:700; font-size:14px;">
+        {% if hrs_until_due < 1 %}{{ (hrs_until_due * 60)|int }}min left
+        {% elif hrs_until_due < 24 %}{{ hrs_until_due|int }}h {{ ((hrs_until_due - hrs_until_due|int) * 60)|int }}min left
+        {% else %}{{ hrs_until_due|int }}h left
+        {% endif %}
+      </span>
+      <span style="color:var(--muted); font-size:13px; margin-left:10px;">Due {{ a.due_fmt }}</span>
+    </div>
+    {% if a.html_url %}
+    <a href="{{ a.html_url }}" target="_blank" style="font-size:12px; color:var(--accent); font-weight:600; text-decoration:none; white-space:nowrap;">Open in Canvas to Submit →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endif %}
+
 <!-- Action row -->
 <div class="action-row">
   {% if a.html_url and a.status not in ('submitted', 'complete') %}
@@ -342,15 +378,16 @@
 </div>
 {% endif %}
 
-{% if grade_impact_pct is not none or course_strategy_note %}
+{% if grade_impact_pct is not none or course_strategy_note or needed_on_assignment %}
 <div class="bonus-block" style="background:rgba(124,108,255,0.05); border-color:rgba(124,108,255,0.2);">
   <strong>Course Impact</strong> —
   {% if grade_impact_pct is not none %}
     This assignment is worth <strong>{{ grade_impact_pct }}%</strong> of your final grade in {{ a.course_name }}.
-    {% if course_strategy_note %}<span style="color:var(--muted);">{{ course_strategy_note }}</span>{% endif %}
-  {% else %}
-    {{ course_strategy_note }}
   {% endif %}
+  {% if needed_on_assignment is not none %}
+    <span style="color:var(--yellow);"> To hit your {{ course_target }}% target, you need at least <strong>{{ needed_on_assignment }}%</strong> on this assignment.</span>
+  {% endif %}
+  {% if course_strategy_note %}<span style="color:var(--muted);">{{ course_strategy_note }}</span>{% endif %}
 </div>
 {% endif %}
 
@@ -386,7 +423,7 @@
   <div style="font-size:12px; color:var(--muted); margin-top:6px;">
     <span style="font-weight:600; color:var(--text);">Sources used:</span>
     {% for m in course_materials %}
-    <span style="display:inline-block; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:2px 8px; margin:2px; font-size:11px;">{{ m.filename }}</span>
+    <span style="display:inline-block; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:2px 8px; margin:2px; font-size:11px;">{{ m.label }}</span>
     {% endfor %}
   </div>
   {% endif %}
@@ -487,6 +524,25 @@
     <div style="font-size:12px; color:var(--muted); padding-left:24px; line-height:1.5; font-style:italic; border-left:2px solid var(--border); margin-left:4px;">
       {{ m.snippet }}…
     </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Piazza Discussions for this assignment -->
+{% set piazza_found = [] %}
+{% for m in course_materials %}{% if m.label.startswith("Piazza:") %}{% if piazza_found.append(m) %}{% endif %}{% endif %}{% endfor %}
+{% if piazza_found %}
+<div class="info-block" style="border-color:rgba(251,191,36,0.25);">
+  <h3>Piazza Discussions</h3>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Classmates asked about this assignment on Piazza — check before you start.</div>
+  {% for m in piazza_found %}
+  <div style="padding:6px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <span style="color:var(--yellow);">&#128172;</span>
+    <span style="margin-left:6px; color:var(--text);">{{ m.label[7:] }}</span>
+    {% if m.snippet %}
+    <div style="font-size:11px; color:var(--muted); margin-top:3px; padding-left:22px; font-style:italic;">{{ m.snippet[:200] }}...</div>
     {% endif %}
   </div>
   {% endfor %}
