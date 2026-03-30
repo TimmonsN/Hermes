@@ -1596,36 +1596,106 @@ def reanalyze_assignment(assignment_id):
 
 @app.route("/api/reanalyze", methods=["POST"])
 def reanalyze_all():
-    """Clear all analysis and re-run. Use when Gemini was misbehaving."""
-    import sqlite3
+    """Clear all analysis and re-run in-process — no Canvas refetch, just re-AI all existing assignments."""
+    import sys, threading
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+    # Clear AI analysis only — keep Canvas data (submissions, grades, due dates)
     conn = db.get_conn()
-    conn.execute("UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority=NULL")
+    conn.execute("UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority=NULL WHERE due_at IS NOT NULL AND due_at >= datetime('now', '-14 days')")
     conn.execute("UPDATE exam_events SET analysis_json=NULL, study_hours_estimated=NULL, start_study_by=NULL")
     conn.commit()
     conn.close()
-    # Track sync status
+
     db.set_pref("reanalyze_status", "running")
     db.set_pref("reanalyze_started", datetime.now().isoformat())
     db.set_pref("reanalyze_finished", "")
-    # Trigger sync in background to re-analyze
-    import threading, sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-    def _run_sync_and_finish():
+    db.set_pref("reanalyze_progress", "0")
+
+    def _run_analysis_only():
+        """Re-analyze existing DB assignments without hitting Canvas API."""
         try:
-            import hermes as h
-            h.sync_canvas()
+            from modules import analyzer as _az
+            # Fetch all unanalyzed assignments (we just cleared them above)
+            unanalyzed = db.get_unanalyzed_assignments()
+            total = len(unanalyzed)
+            if total == 0:
+                db.set_pref("reanalyze_status", "done")
+                return
+
+            # Group by course for batch analysis
+            from collections import defaultdict
+            by_course = defaultdict(list)
+            for a in unanalyzed:
+                by_course[str(a.get("course_id", ""))].append(a)
+
+            done = 0
+            for cid, course_assignments in by_course.items():
+                try:
+                    syllabus_list = db.get_syllabus(cid)
+                    rules_map = {}
+                    materials_map = {}
+                    notes_map = {}
+                    for s in syllabus_list:
+                        if s.get("rules_json"):
+                            try:
+                                rules_map[cid] = json.loads(s["rules_json"])
+                            except Exception:
+                                pass
+                        fname = s.get("filename", "")
+                        if not fname.startswith("__piazza__"):
+                            materials_map.setdefault(cid, []).append({"label": fname, "content": s.get("content", "")[:2000]})
+
+                    groups_map = {cid: db.get_assignment_groups(cid)}
+
+                    CHUNK = 8
+                    for i in range(0, len(course_assignments), CHUNK):
+                        chunk = course_assignments[i:i+CHUNK]
+                        results = _az.analyze_assignments_batch(
+                            chunk,
+                            {cid: rules_map.get(cid, {})},
+                            {cid: materials_map.get(cid, [])},
+                            notes_map,
+                            groups_map,
+                        )
+                        for r in results:
+                            if r.get("analysis_json"):
+                                try:
+                                    analysis = json.loads(r["analysis_json"]) if isinstance(r["analysis_json"], str) else r["analysis_json"]
+                                    c2 = db.get_conn()
+                                    c2.execute("""UPDATE assignments SET analysis_json=?, difficulty=?, estimated_hours=?,
+                                                   start_by=?, priority=? WHERE id=?""",
+                                               (json.dumps(analysis),
+                                                analysis.get("difficulty"),
+                                                analysis.get("estimated_hours"),
+                                                analysis.get("start_by"),
+                                                analysis.get("priority"),
+                                                r["id"]))
+                                    c2.commit()
+                                    c2.close()
+                                except Exception:
+                                    pass
+                        done += len(chunk)
+                        pct = round(done / total * 100)
+                        db.set_pref("reanalyze_progress", str(pct))
+                except Exception:
+                    done += len(course_assignments)
+                    db.set_pref("reanalyze_progress", str(round(done / total * 100)))
+
         except Exception:
             pass
-        db.set_pref("reanalyze_status", "done")
-        _now_iso = datetime.now().isoformat()
-        db.set_pref("reanalyze_finished", _now_iso)
-        db.set_pref("last_analysis_time", _now_iso)
+        finally:
+            _now_iso = datetime.now().isoformat()
+            db.set_pref("reanalyze_status", "done")
+            db.set_pref("reanalyze_finished", _now_iso)
+            db.set_pref("last_analysis_time", _now_iso)
+
     try:
-        t = threading.Thread(target=_run_sync_and_finish, daemon=True)
+        t = threading.Thread(target=_run_analysis_only, daemon=True)
         t.start()
     except Exception:
         db.set_pref("reanalyze_status", "idle")
-    return jsonify({"status": "re-analysis started — refresh in a minute"})
+    return jsonify({"status": "re-analysis started"})
 
 
 @app.route("/api/sync-status")
@@ -1634,7 +1704,8 @@ def sync_status():
     status = db.get_pref("reanalyze_status") or "idle"
     started = db.get_pref("reanalyze_started") or ""
     finished = db.get_pref("reanalyze_finished") or ""
-    return jsonify({"status": status, "started": started, "finished": finished})
+    progress = int(db.get_pref("reanalyze_progress") or "0")
+    return jsonify({"status": status, "started": started, "finished": finished, "progress": progress})
 
 
 # ─── Grades ───────────────────────────────────────────────────────────────────

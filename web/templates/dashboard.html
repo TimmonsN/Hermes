@@ -389,12 +389,17 @@ function startReanalyzePoll() {
         _reanalyzePollTimer = null;
         showReanalyzeStatus('Analysis complete — refreshing...');
         setTimeout(() => location.reload(), 1500);
-      } else if (data.status === 'running' && data.started) {
-        const elapsed = Math.round((Date.now() - new Date(data.started).getTime()) / 1000);
-        showReanalyzeStatus(`Hermes is re-analyzing — ${elapsed}s elapsed`);
+      } else if (data.status === 'running') {
+        const pct = data.progress || 0;
+        if (pct > 0) {
+          showReanalyzeStatus(`Re-analyzing assignments… ${pct}% done`);
+        } else if (data.started) {
+          const elapsed = Math.round((Date.now() - new Date(data.started).getTime()) / 1000);
+          showReanalyzeStatus(`Re-analyzing… ${elapsed}s`);
+        }
       }
     } catch(e) {}
-  }, 4000);
+  }, 3000);
 }
 
 // On load: resume polling if analysis is already in flight
