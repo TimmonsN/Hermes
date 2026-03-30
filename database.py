@@ -418,6 +418,10 @@ def update_assignment_status(assignment_id, status):
     conn.commit()
     conn.close()
 
+def mark_assignment_submitted(assignment_id):
+    """Convenience alias: mark an assignment as submitted (Canvas sync confirmed)."""
+    update_assignment_status(assignment_id, "submitted")
+
 def mark_notified(assignment_id, notif_field):
     conn = get_conn()
     conn.execute(f"UPDATE assignments SET {notif_field}=1 WHERE id=?", (assignment_id,))
