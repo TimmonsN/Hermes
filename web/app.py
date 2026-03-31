@@ -2,6 +2,8 @@ import sys
 import os
 import json
 import logging
+import math as _math
+from collections import defaultdict
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, request, jsonify, redirect, url_for
@@ -445,7 +447,6 @@ def dashboard():
             pass
 
     # Warning: 3+ assignments due same day
-    from collections import defaultdict
     day_counts = defaultdict(list)
     for a in assignments:
         if a.get("due_dt"):
@@ -553,48 +554,6 @@ def dashboard():
 
     week_synthesis = db.get_pref("week_synthesis") or ""
 
-    # --- 2-Week Workload Heat Calendar ---
-    heat_calendar = []
-    for i in range(14):
-        day_date = (now + timedelta(days=i)).date()
-        day_assignments = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == day_date]
-        # Safe exam date extraction
-        _day_exams = []
-        for e in exams:
-            if e.get("start_at"):
-                try:
-                    if _from_canvas_time(e["start_at"]).date() == day_date:
-                        _day_exams.append(e)
-                except Exception:
-                    pass
-        total_hours = round(sum(a.get("estimated_hours") or 0 for a in day_assignments), 1)
-        exam_on_day = len(_day_exams) > 0
-        # Heat level: none / light / moderate / heavy / critical
-        if exam_on_day:
-            heat = "critical"
-        elif total_hours == 0:
-            heat = "none"
-        elif total_hours < 2:
-            heat = "light"
-        elif total_hours < 4:
-            heat = "moderate"
-        elif total_hours < 7:
-            heat = "heavy"
-        else:
-            heat = "critical"
-        heat_calendar.append({
-            "date": day_date.isoformat(),
-            "label": day_date.strftime("%-d"),
-            "weekday": day_date.strftime("%a"),
-            "total_hours": total_hours,
-            "count": len(day_assignments),
-            "exam": exam_on_day,
-            "heat": heat,
-            "is_today": i == 0,
-            "assignments": [{"id": a["id"], "title": a["title"][:40]} for a in day_assignments[:5]],
-            "exams": [{"id": e["id"], "title": e["title"][:40]} for e in _day_exams],
-        })
-
     # --- Tonight's Study Session Plan ---
     TONIGHT_HOURS = 3.0
     session_plan = []
@@ -696,7 +655,6 @@ def dashboard():
     dd_due_tomorrow = [a for a in assignments if a.get("due_dt") and a["due_dt"].date() == tomorrow_date]
 
     # Should start today: assignments where start_by date is today
-    import math as _math
     dd_start_today = []
     for a in assignments:
         if not a.get("due_dt"):
@@ -785,7 +743,6 @@ def dashboard():
         all_done_today=all_done_today,
         today_due_any=today_due_any,
         inbox_announcements=inbox_announcements,
-        heat_calendar=heat_calendar,
     )
 
 
@@ -1326,6 +1283,14 @@ def assignments_page():
                if a.get("status") not in ("submitted", "complete")
                and a.get("due_dt") and a["due_dt"] < now]
 
+    # Count upcoming unanalyzed assignments for the progress banner
+    try:
+        unanalyzed_count = db.get_conn().execute(
+            "SELECT COUNT(*) FROM assignments WHERE analysis_json IS NULL AND due_at >= datetime('now')"
+        ).fetchone()[0]
+    except Exception:
+        unanalyzed_count = 0
+
     return render_template("assignments.html",
                            assignments=assignments,
                            all_assignments=all_enriched,
@@ -1334,7 +1299,8 @@ def assignments_page():
                            courses=courses,
                            course_names=course_names,
                            total_hours=total_hours,
-                           course_completion=course_completion)
+                           course_completion=course_completion,
+                           unanalyzed_count=unanalyzed_count)
 
 
 @app.route("/exams")
@@ -1792,7 +1758,6 @@ def reanalyze_all():
                 return
 
             # Group by course for batch analysis
-            from collections import defaultdict
             by_course = defaultdict(list)
             for a in unanalyzed:
                 by_course[str(a.get("course_id", ""))].append(a)
@@ -1868,12 +1833,26 @@ def reanalyze_all():
 
 @app.route("/api/sync-status")
 def sync_status():
-    """Return current re-analysis/sync status for dashboard polling."""
+    """Return current re-analysis/sync status for dashboard and assignments page polling."""
     status = db.get_pref("reanalyze_status") or "idle"
     started = db.get_pref("reanalyze_started") or ""
     finished = db.get_pref("reanalyze_finished") or ""
     progress = int(db.get_pref("reanalyze_progress") or "0")
-    return jsonify({"status": status, "started": started, "finished": finished, "progress": progress})
+    # Include count of upcoming unanalyzed assignments so the assignments page
+    # can show a live progress banner without a separate DB call.
+    try:
+        unanalyzed = db.get_conn().execute(
+            "SELECT COUNT(*) FROM assignments WHERE analysis_json IS NULL AND due_at >= datetime('now')"
+        ).fetchone()[0]
+    except Exception:
+        unanalyzed = 0
+    return jsonify({
+        "status": status,
+        "started": started,
+        "finished": finished,
+        "progress": progress,
+        "unanalyzed_count": unanalyzed,
+    })
 
 
 # ─── Grades ───────────────────────────────────────────────────────────────────
@@ -1951,6 +1930,7 @@ def grades_page():
                 "ai_suggested_target": None, "ai_target_reasoning": None,
                 "patterns": [],
                 "health_score": 50, "health_color": "muted", "health_label": "No data",
+                "health_reason": "No grade data yet.",
                 "submitted_count": 0, "total_asgn_count": 0,
             })
             continue
@@ -2144,24 +2124,51 @@ def grades_page():
                     )
 
         # --- Course Health Score ---
-        # Combines: on_track (vs target), trend, days_until_final, assignments_remaining
-        # Result: "green" | "yellow" | "red" with a numeric score 0-100
+        # Formula: base = 50 + (current - target) * 1.5, capped 0-100.
+        # Trend modifier: +10 for upward trend, -15 for downward.
+        # Final penalty: -10 if needed-on-final > 85% (hard to recover).
+        # Result: score → color (green ≥70, yellow ≥45, red <45) + human reason tooltip.
         health_score = 50  # default neutral
         health_color = "yellow"
         health_label = "Needs attention"
+        health_reason = "No grade data yet."
         if display_avg is not None:
-            # Base: how far above/below target
             gap = display_avg - target
             health_score = min(100, max(0, 50 + gap * 1.5))
-            # Trend modifier
+
+            # Build the reason string with specific numbers so the tooltip is useful
+            gap_abs = abs(round(gap, 1))
+            if gap >= 0:
+                reason_parts = [f"{display_avg:.1f}% current — {gap_abs}% above your {target:.0f}% target."]
+            else:
+                reason_parts = [f"{display_avg:.1f}% current — {gap_abs}% below your {target:.0f}% target."]
+
+            # Trend modifier (with explanation)
             if trend == "up":
                 health_score = min(100, health_score + 10)
+                reason_parts.append("Grade trending up.")
             elif trend == "down":
                 health_score = max(0, health_score - 15)
-            # Final exam proximity: if final is near and score is borderline, penalize
-            if needed_on_final is not None and needed_on_final > 85:
-                health_score = max(0, health_score - 10)
-            # Grade tiers
+                reason_parts.append("Grade trending down.")
+            else:
+                reason_parts.append("Grade stable.")
+
+            # Final exam proximity penalty (with explanation)
+            if needed_on_final is not None:
+                if needed_on_final > 100:
+                    health_score = max(0, health_score - 10)
+                    reason_parts.append(f"Need {needed_on_final:.0f}% on final (out of reach).")
+                elif needed_on_final > 85:
+                    health_score = max(0, health_score - 10)
+                    reason_parts.append(f"Need {needed_on_final:.0f}% on final.")
+                else:
+                    reason_parts.append(f"Need {needed_on_final:.0f}% on final.")
+            else:
+                reason_parts.append("No final exam data yet.")
+
+            health_reason = " ".join(reason_parts)
+
+            # Color tiers
             if health_score >= 70:
                 health_color = "green"
                 health_label = "On track"
@@ -2174,6 +2181,7 @@ def grades_page():
         elif display_avg is None:
             health_color = "muted"
             health_label = "No data"
+            health_reason = "No grade data yet."
 
         # --- Assignment completion rate ---
         total_course_asgns = len(all_course_assignments)
@@ -2205,6 +2213,7 @@ def grades_page():
             "health_score": round(health_score),
             "health_color": health_color,
             "health_label": health_label,
+            "health_reason": health_reason,
             "submitted_count": submitted_count,
             "total_asgn_count": total_course_asgns,
         })
@@ -2239,8 +2248,6 @@ def toggle_course_ignore(course_id):
 
 @app.route("/study-plan")
 def study_plan_page():
-    import math
-    from collections import defaultdict
     plan = db.get_study_plan()
 
     # Group saved plan entries by date
@@ -2270,7 +2277,7 @@ def study_plan_page():
             if a["due_dt"].date() == day_date:
                 continue  # already in due_this_day
             est_hours = a.get("estimated_hours") or 2.0
-            days_to_start_before = math.ceil(est_hours / 3)
+            days_to_start_before = _math.ceil(est_hours / 3)
             ideal_start = a["due_dt"].date() - timedelta(days=days_to_start_before)
             if ideal_start == day_date:
                 start_today.append(a)
@@ -2301,7 +2308,7 @@ def study_plan_page():
                                 study_hours = ea.get("study_hours", 6)
                             except Exception:
                                 pass
-                        days_needed = math.ceil(study_hours / 3)
+                        days_needed = _math.ceil(study_hours / 3)
                         start_day = exam_dt.date() - timedelta(days=days_needed)
                         if start_day == day_date:
                             exam_study_reminders.append({
@@ -2373,16 +2380,35 @@ def alerts_page():
     exams = [_enrich_exam(e) for e in exams_raw]
 
     # --- API quota status ---
+    # get_api_usage_summary() returns {provider: {total, analysis, chat}}
+    # Build human-readable breakdown labels so the display is actually informative.
     usage = db.get_api_usage_summary()
-    gemini_calls = usage.get("gemini", 0)
-    groq_calls = usage.get("groq", 0)
     gemini_limit = _Cfg.GEMINI_DAILY_LIMIT
     groq_limit = _Cfg.GROQ_DAILY_LIMIT
+
+    def _usage_detail(provider_data):
+        """Build 'N analysis + M chat' string from per-type counts."""
+        if not provider_data:
+            return "0"
+        analysis = provider_data.get("analysis", 0)
+        chat = provider_data.get("chat", 0)
+        parts = []
+        if analysis:
+            parts.append(f"{analysis} analysis")
+        if chat:
+            parts.append(f"{chat} chat")
+        return " + ".join(parts) if parts else "0"
+
+    gemini_data = usage.get("gemini", {})
+    groq_data = usage.get("groq", {})
+    gemini_calls = gemini_data.get("total", 0) if isinstance(gemini_data, dict) else int(gemini_data or 0)
+    groq_calls = groq_data.get("total", 0) if isinstance(groq_data, dict) else int(groq_data or 0)
 
     quota_status = [
         {
             "provider": "Gemini",
             "calls": gemini_calls,
+            "calls_detail": _usage_detail(gemini_data) if isinstance(gemini_data, dict) else str(gemini_calls),
             "limit": gemini_limit,
             "pct": round(gemini_calls / gemini_limit * 100) if gemini_limit else 0,
             "exhausted": gemini_calls >= gemini_limit,
@@ -2391,6 +2417,7 @@ def alerts_page():
         {
             "provider": "Groq",
             "calls": groq_calls,
+            "calls_detail": _usage_detail(groq_data) if isinstance(groq_data, dict) else str(groq_calls),
             "limit": groq_limit,
             "pct": round(groq_calls / groq_limit * 100) if groq_limit else 0,
             "exhausted": groq_calls >= groq_limit,
@@ -2461,7 +2488,6 @@ def alerts_page():
                 pass
 
     # 3+ assignments same day
-    from collections import defaultdict
     day_map = defaultdict(list)
     for a in assignments:
         if a.get("due_dt"):

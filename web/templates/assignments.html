@@ -71,6 +71,7 @@
   .row-check {
     accent-color: var(--accent);
   }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 {% endblock %}
 
@@ -79,6 +80,23 @@
   <h1>Assignments</h1>
 </div>
 <p class="subtitle" id="filterStats">{{ total }} todo &nbsp;·&nbsp; ~{{ total_hours }}h total</p>
+
+{% if unanalyzed_count > 0 %}
+<div id="analyzingBanner" style="background:rgba(124,108,255,0.1); border:1px solid rgba(124,108,255,0.3); border-radius:8px; padding:10px 16px; margin-bottom:12px; font-size:13px; color:var(--accent); display:flex; align-items:center; gap:8px;">
+  <span style="display:inline-block; width:10px; height:10px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+  Hermes is analyzing {{ unanalyzed_count }} assignment{{ 's' if unanalyzed_count != 1 else '' }} — page will refresh when done
+</div>
+<script>
+// Auto-refresh every 20s while analysis is in progress
+setTimeout(function() {
+  fetch('/api/sync-status').then(r => r.json()).then(data => {
+    if ((data.unanalyzed_count || 0) > 0 || data.status === 'running') {
+      location.reload();
+    }
+  }).catch(() => {});
+}, 20000);
+</script>
+{% endif %}
 
 {% if overdue %}
 <div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.35); border-radius:8px; padding:10px 16px; margin-bottom:14px; font-size:13px; color:var(--red); font-weight:600;">

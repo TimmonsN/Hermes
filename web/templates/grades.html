@@ -120,7 +120,7 @@
       <div style="display:flex; align-items:center; gap:8px;">
         <div class="grade-course-name">{{ c.name }}</div>
         {% if c.health_color and c.health_color != 'muted' %}
-        <span title="{{ c.health_label }} (health score: {{ c.health_score }}/100)"
+        <span title="{{ c.health_reason }}"
               style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--{{ c.health_color }}); flex-shrink:0;"></span>
         <span style="font-size:11px; color:var(--{{ c.health_color }}); font-weight:600;">{{ c.health_label }}</span>
         {% endif %}

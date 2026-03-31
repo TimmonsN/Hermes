@@ -178,8 +178,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT,
             date TEXT,
+            call_type TEXT DEFAULT 'analysis',
             calls INTEGER DEFAULT 0,
-            UNIQUE(provider, date)
+            UNIQUE(provider, date, call_type)
         );
 
         CREATE TABLE IF NOT EXISTS assignment_groups (
@@ -204,6 +205,9 @@ def init_db():
         "ALTER TABLE assignments ADD COLUMN canvas_group_id INTEGER",
         "ALTER TABLE assignments ADD COLUMN lock_at TIMESTAMP",
         "ALTER TABLE courses ADD COLUMN term_name TEXT",
+        # BUG #2 fix: track analysis vs chat calls separately so the Alerts page
+        # can show "12 analysis + 3 chat" instead of a raw undifferentiated number.
+        "ALTER TABLE api_usage ADD COLUMN call_type TEXT DEFAULT 'analysis'",
     ]:
         try:
             conn.execute(migration)
@@ -820,35 +824,54 @@ def get_study_plan():
 
 # --- API Usage Tracking ---
 
-def track_api_call(provider: str):
-    """Increment today's call count for a given provider ('gemini' or 'groq')."""
+def track_api_call(provider: str, call_type: str = "analysis"):
+    """Increment today's call count for a given provider ('gemini' or 'groq').
+
+    call_type: 'analysis' for batch/single assignment AI, 'chat' for conversational.
+    Tracked separately so the Alerts page can show a breakdown instead of a raw total.
+    """
     conn = get_conn()
     today = datetime.now().strftime("%Y-%m-%d")
     conn.execute("""
-        INSERT INTO api_usage (provider, date, calls) VALUES (?, ?, 1)
-        ON CONFLICT(provider, date) DO UPDATE SET calls = calls + 1
-    """, (provider, today))
+        INSERT INTO api_usage (provider, date, call_type, calls) VALUES (?, ?, ?, 1)
+        ON CONFLICT(provider, date, call_type) DO UPDATE SET calls = calls + 1
+    """, (provider, today, call_type))
     conn.commit()
     conn.close()
 
 def get_api_usage_today(provider: str) -> int:
+    """Return total calls today for a provider (all call types combined)."""
     conn = get_conn()
     today = datetime.now().strftime("%Y-%m-%d")
     row = conn.execute(
-        "SELECT calls FROM api_usage WHERE provider=? AND date=?", (provider, today)
+        "SELECT SUM(calls) as calls FROM api_usage WHERE provider=? AND date=?",
+        (provider, today)
     ).fetchone()
     conn.close()
-    return row["calls"] if row else 0
+    return row["calls"] if row and row["calls"] else 0
 
 def get_api_usage_summary() -> dict:
-    """Returns {provider: calls_today} for all tracked providers."""
+    """Returns {provider: {total, analysis, chat}} for all tracked providers today.
+
+    Structure lets the Alerts page show "12 analysis + 3 chat" per provider.
+    """
     conn = get_conn()
     today = datetime.now().strftime("%Y-%m-%d")
     rows = conn.execute(
-        "SELECT provider, calls FROM api_usage WHERE date=?", (today,)
+        "SELECT provider, call_type, calls FROM api_usage WHERE date=?", (today,)
     ).fetchall()
     conn.close()
-    return {r["provider"]: r["calls"] for r in rows}
+
+    summary = {}
+    for r in rows:
+        p = r["provider"]
+        ct = r["call_type"] or "analysis"
+        calls = r["calls"] or 0
+        if p not in summary:
+            summary[p] = {"total": 0, "analysis": 0, "chat": 0}
+        summary[p][ct] = summary[p].get(ct, 0) + calls
+        summary[p]["total"] += calls
+    return summary
 
 
 def get_semester_completed_count():

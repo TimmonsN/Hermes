@@ -111,8 +111,13 @@ Hard rules:
 - Don't add unsolicited advice after answering — if he wants more, he'll ask.
 - Be warm but not sycophantic. No "Great question!" or "Absolutely!"."""
 
-def _ask_groq(prompt: str, model: str = None, system_prompt: str = None) -> str:
-    """Send a prompt to Groq and return the text response."""
+def _ask_groq(prompt: str, model: str = None, system_prompt: str = None,
+              call_type: str = "analysis") -> str:
+    """Send a prompt to Groq and return the text response.
+
+    call_type: "analysis" (batch/single assignment AI) or "chat" (conversational).
+    Used for per-type usage tracking on the Alerts page.
+    """
     client = _get_groq_client()
     if not client:
         raise RuntimeError("Groq not configured — set GROQ_API_KEY")
@@ -126,12 +131,15 @@ def _ask_groq(prompt: str, model: str = None, system_prompt: str = None) -> str:
         ],
         temperature=0.3,
     )
-    db.track_api_call("groq")
+    db.track_api_call("groq", call_type=call_type)
     return response.choices[0].message.content
 
 
-def _ask(prompt: str, retries: int = 1) -> str:
-    """Send a prompt to Gemini. Falls back to Groq quickly if Gemini is rate-limited."""
+def _ask(prompt: str, retries: int = 1, call_type: str = "analysis") -> str:
+    """Send a prompt to Gemini. Falls back to Groq quickly if Gemini is rate-limited.
+
+    call_type: passed through to tracking so analysis vs chat calls are counted separately.
+    """
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
     last_exc = None
     for attempt in range(retries + 1):
@@ -140,7 +148,7 @@ def _ask(prompt: str, retries: int = 1) -> str:
                 model=Config.GEMINI_MODEL,
                 contents=full_prompt,
             )
-            db.track_api_call("gemini")
+            db.track_api_call("gemini", call_type=call_type)
             return response.text
         except ClientError as e:
             if e.code == 429:
@@ -155,7 +163,7 @@ def _ask(prompt: str, retries: int = 1) -> str:
     # Gemini exhausted — fall back to Groq
     if Config.GROQ_API_KEY:
         logger.warning("Gemini retries exhausted (429) — falling back to Groq")
-        return _ask_groq(prompt)
+        return _ask_groq(prompt, call_type=call_type)
     raise last_exc  # no Groq, re-raise
 
 
@@ -488,23 +496,36 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
                     a["priority"] = "high"
         return results
 
-    # Try Gemini first, then Groq on 429
-    try:
-        raw = _ask(prompt)  # _ask already handles Gemini→Groq fallback internally
-        results = _parse_batch_result(raw, len(assignments))
-        return _enforce_calibration(_apply_start_by(results))
+    # Try Gemini first (with Groq fallback inside _ask). On rate limit: wait 20s and
+    # retry once before giving up. A single 429 shouldn't permanently skip the batch —
+    # that was the root cause of 98 unanalyzed assignments in the original bug.
+    for _batch_attempt in range(2):
+        try:
+            raw = _ask(prompt)  # _ask already handles Gemini→Groq fallback internally
+            results = _parse_batch_result(raw, len(assignments))
+            return _enforce_calibration(_apply_start_by(results))
 
-    except ClientError as e:
-        if e.code == 429:
-            logger.warning(f"Batch fully rate-limited — returning defaults for {len(assignments)} assignments.")
-            return [_default_analysis() for _ in assignments]
-        logger.error(f"Batch API error ({e}), falling back to individual analysis")
-    except Exception as e:
-        # If it's a rate limit from Groq (or any provider), don't fall to individual — they'll all fail too
-        if "429" in str(e) or "rate_limit" in str(e).lower():
-            logger.warning(f"Batch rate-limited (provider error) — returning defaults for {len(assignments)} assignments.")
-            return [_default_analysis() for _ in assignments]
-        logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
+        except ClientError as e:
+            if e.code == 429:
+                if _batch_attempt == 0:
+                    logger.warning(f"Batch rate-limited (Gemini 429) — waiting 20s before retry...")
+                    time.sleep(20)
+                    continue  # retry
+                logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(assignments)} assignments.")
+                return [_default_analysis() for _ in assignments]
+            logger.error(f"Batch API error ({e}), falling back to individual analysis")
+            break  # non-429 error → fall through to individual analysis
+        except Exception as e:
+            # Rate limit from Groq or any provider — wait and retry rather than immediately giving up
+            if "429" in str(e) or "rate_limit" in str(e).lower():
+                if _batch_attempt == 0:
+                    logger.warning(f"Batch rate-limited (provider 429) — waiting 20s before retry...")
+                    time.sleep(20)
+                    continue  # retry
+                logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(assignments)} assignments.")
+                return [_default_analysis() for _ in assignments]
+            logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
+            break  # non-rate-limit error → fall through to individual analysis
 
     # Parse/logic failure (not rate limit) — try individual analysis
     fallback = []
@@ -876,11 +897,13 @@ Recent graded assignments:
 Niko: {user_message}"""
 
     try:
-        # Groq is primary for chat — faster, more conversational
+        # Groq is primary for chat — faster, more conversational.
+        # call_type="chat" ensures chat calls are tracked separately from analysis
+        # calls, so the Alerts page can show a meaningful breakdown.
         if Config.GROQ_API_KEY:
             return _ask_groq(prompt, model=Config.GROQ_MODEL_CHAT,
-                             system_prompt=HERMES_CHAT_PERSONA)
-        return _ask(prompt)
+                             system_prompt=HERMES_CHAT_PERSONA, call_type="chat")
+        return _ask(prompt, call_type="chat")
     except Exception as e:
         logger.error(f"Chat response failed: {e}")
         return "Hit an error — try again in a moment."

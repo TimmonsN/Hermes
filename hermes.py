@@ -197,15 +197,22 @@ def sync_canvas():
     # Clean up exam entries that slipped through old/looser keyword matching
     _clean_bad_exams()
 
-    # Analyze using batch calls (up to 15 per API request)
+    # Analyze using batch calls (up to 15 per API request).
+    #
+    # IMPORTANT: We must never break out of the loop on a rate limit — that was
+    # the original bug that left 98/199 assignments unanalyzed. Instead we do
+    # per-batch exponential backoff (30s → 60s → skip) so one throttled batch
+    # doesn't kill every subsequent batch.
     all_to_analyze = new_for_analysis + needs_reanalysis
+    analyzed_count = 0
+    skipped_count = 0
     if all_to_analyze:
         BATCH_SIZE = 15
         chunks = [all_to_analyze[i:i + BATCH_SIZE] for i in range(0, len(all_to_analyze), BATCH_SIZE)]
         logger.info(f"Analyzing {len(all_to_analyze)} assignments in {len(chunks)} batch(es) of up to {BATCH_SIZE}...")
         for batch_num, chunk in enumerate(chunks, start=1):
             logger.info(f"  Batch {batch_num}/{len(chunks)}: {len(chunk)} assignments")
-            # Build syllabus_rules_map, course_materials_map, course_groups_map for this chunk
+            # Build per-batch context maps (syllabus rules, materials, notes, groups)
             rules_map = {}
             materials_map = {}
             course_notes_map = {}
@@ -220,27 +227,60 @@ def sync_canvas():
                     course_notes_map[cid] = db.get_course_notes(cid)
                 if cid not in groups_map:
                     groups_map[cid] = db.get_assignment_groups(cid)
-            try:
-                analyses = analyzer.analyze_assignments_batch(chunk, rules_map, materials_map, course_notes_map, groups_map)
-                stored = 0
-                all_rate_limited = True
-                for a, analysis in zip(chunk, analyses):
-                    if analysis.get("_rate_limited"):
-                        continue  # don't store placeholder — will retry on next sync
-                    all_rate_limited = False
-                    db.store_analysis(a["id"], analysis)
-                    stored += 1
-                    logger.info(f"    OK: {a['title']} | diff={analysis.get('difficulty')} "
-                                f"hrs={analysis.get('estimated_hours')} priority={analysis.get('priority')}")
-                if stored < len(chunk):
-                    logger.warning(f"  Batch {batch_num}: {len(chunk)-stored} skipped (rate limited)")
-                if all_rate_limited:
-                    logger.warning("  Both providers rate-limited — aborting analysis queue until next sync.")
-                    break
-            except Exception as e:
-                logger.warning(f"  Batch {batch_num} failed entirely: {e}")
+
+            # Retry loop: up to 3 attempts per batch with exponential backoff.
+            # On rate limit: wait and retry rather than aborting the whole queue.
+            # Only skip a batch after 3 consecutive rate-limit failures on it.
+            batch_stored = 0
+            for attempt in range(3):
+                try:
+                    analyses = analyzer.analyze_assignments_batch(
+                        chunk, rules_map, materials_map, course_notes_map, groups_map
+                    )
+                    all_rate_limited = True
+                    for a, analysis in zip(chunk, analyses):
+                        if analysis.get("_rate_limited"):
+                            continue  # don't store — will retry on next sync
+                        all_rate_limited = False
+                        db.store_analysis(a["id"], analysis)
+                        batch_stored += 1
+                        analyzed_count += 1
+                        logger.info(f"    OK: {a['title']} | diff={analysis.get('difficulty')} "
+                                    f"hrs={analysis.get('estimated_hours')} priority={analysis.get('priority')}")
+
+                    if all_rate_limited:
+                        # Every item in the batch came back rate-limited.
+                        # Wait and retry (exponential: 30s, then 60s, then skip).
+                        wait = 30 * (2 ** attempt)
+                        if attempt < 2:
+                            logger.warning(f"  Batch {batch_num} fully rate-limited (attempt {attempt+1}/3) "
+                                           f"— waiting {wait}s before retry...")
+                            time.sleep(wait)
+                            continue  # retry the same batch
+                        else:
+                            logger.warning(f"  Batch {batch_num} rate-limited after 3 attempts — "
+                                           f"skipping {len(chunk)} assignments (will retry next sync).")
+                            skipped_count += len(chunk)
+                    else:
+                        # At least some items analyzed — log partial skips if any
+                        skipped_in_batch = len(chunk) - batch_stored
+                        if skipped_in_batch > 0:
+                            logger.warning(f"  Batch {batch_num}: {skipped_in_batch} skipped (rate limited)")
+                            skipped_count += skipped_in_batch
+                    break  # done with this batch (success or partial success)
+                except Exception as e:
+                    logger.warning(f"  Batch {batch_num} attempt {attempt+1} failed: {e}")
+                    if attempt < 2:
+                        time.sleep(30)
+                    else:
+                        logger.warning(f"  Batch {batch_num} failed after 3 attempts — continuing to next batch.")
+                        skipped_count += len(chunk)
+                    # Never break the outer loop — always continue to the next batch
+
             if batch_num < len(chunks):
-                time.sleep(15)  # pause between batches to respect rate limits
+                time.sleep(20)  # kinder to API rate limits — 20s between batches
+
+    logger.info(f"Analysis complete: {analyzed_count} analyzed, {skipped_count} skipped (rate limited).")
 
     # Analyze new exams (rate limited)
     for exam in db.get_upcoming_exams(days_ahead=60):
