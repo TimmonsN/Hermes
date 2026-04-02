@@ -13,6 +13,18 @@ logger = logging.getLogger("hermes.analyzer")
 _gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
 _groq_client = None
 
+# Default batch size for Groq — much smaller than Gemini because Groq has a
+# tighter context window (~6k tokens per request vs Gemini's 1M).
+GROQ_BATCH_SIZE = 8
+
+
+class PayloadTooLargeError(Exception):
+    """Raised when a provider rejects our request because the payload exceeds its limit.
+
+    Unlike a 429 rate limit this is NOT a transient error — retrying the same
+    payload will fail again.  The caller must reduce the context and retry.
+    """
+
 # Phrases that indicate a Canvas submission placeholder, not a real description
 _BOILERPLATE_PHRASES = [
     "please use this to submit",
@@ -117,54 +129,104 @@ def _ask_groq(prompt: str, model: str = None, system_prompt: str = None,
 
     call_type: "analysis" (batch/single assignment AI) or "chat" (conversational).
     Used for per-type usage tracking on the Alerts page.
+
+    Raises:
+        PayloadTooLargeError — if Groq returns HTTP 413 (payload too large).
+            This is NOT a rate limit; the caller must reduce context and retry.
+        RuntimeError — if Groq is not configured.
     """
     client = _get_groq_client()
     if not client:
         raise RuntimeError("Groq not configured — set GROQ_API_KEY")
     use_model = model or Config.GROQ_MODEL_ANALYSIS
     sys_msg = system_prompt or HERMES_PERSONA
-    response = client.chat.completions.create(
-        model=use_model,
-        messages=[
-            {"role": "system", "content": sys_msg},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+    except Exception as e:
+        # Groq SDK wraps HTTP errors — check for 413 (payload too large).
+        # The error message/type varies by SDK version so we check broadly.
+        err_str = str(e)
+        if "413" in err_str or "request_too_large" in err_str.lower() or "payload too large" in err_str.lower() or "too_large" in err_str.lower():
+            raise PayloadTooLargeError(f"Groq rejected payload as too large: {e}") from e
+        raise
     db.track_api_call("groq", call_type=call_type)
     return response.choices[0].message.content
 
 
-def _ask(prompt: str, retries: int = 1, call_type: str = "analysis") -> str:
-    """Send a prompt to Gemini. Falls back to Groq quickly if Gemini is rate-limited.
+# Gemini model fallback chain for analysis.  When the primary model (set in
+# Config.GEMINI_MODEL / .env GEMINI_MODEL) is rate-limited we roll through these
+# in order before giving up on Gemini entirely and falling to Groq.  Each model
+# has its own independent RPD/RPM budget on the same free-tier API key, so
+# rotating across them multiplies how many batches we can complete per day.
+#
+# Free-tier limits (approx, as of 2026-04):
+#   gemini-2.5-flash       : 10 RPM, 250K TPM, 500 RPD
+#   gemini-2.0-flash       : 15 RPM, 1M   TPM, 1500 RPD
+#   gemini-1.5-flash       : 15 RPM, 1M   TPM, 1500 RPD
+#   gemini-1.5-flash-8b    : 15 RPM, 1M   TPM, 1500 RPD
+_GEMINI_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
 
-    call_type: passed through to tracking so analysis vs chat calls are counted separately.
+
+def _ask(prompt: str, retries: int = 1, call_type: str = "analysis") -> str:
+    """Send a prompt to Gemini with multi-model fallback, then Groq.
+
+    Strategy:
+      1. Try Config.GEMINI_MODEL (primary — highest capability).
+      2. On 429, immediately try the next model in _GEMINI_FALLBACK_MODELS rather
+         than sleeping — each model has its own budget so there's no point waiting.
+      3. Only sleep briefly (3s) between same-model retries to respect RPM limits.
+      4. If all Gemini models are exhausted, fall to Groq.
+
+    call_type: "analysis" or "chat" — passed to usage tracking.
     """
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
-    last_exc = None
-    for attempt in range(retries + 1):
-        try:
-            response = _gemini_client.models.generate_content(
-                model=Config.GEMINI_MODEL,
-                contents=full_prompt,
-            )
-            db.track_api_call("gemini", call_type=call_type)
-            return response.text
-        except ClientError as e:
-            if e.code == 429:
-                last_exc = e
-                if attempt < retries:
-                    wait = 15 * (2 ** attempt)  # 15s, then fall to Groq
-                    logger.warning(f"Gemini rate limited (attempt {attempt+1}/{retries+1}), waiting {wait}s...")
-                    time.sleep(wait)
-            else:
-                raise  # non-429 Gemini error
 
-    # Gemini exhausted — fall back to Groq
+    # Build the ordered list: primary first, then fallbacks (deduplicated)
+    primary = Config.GEMINI_MODEL
+    model_chain = [primary] + [m for m in _GEMINI_FALLBACK_MODELS if m != primary]
+
+    last_exc = None
+    for model in model_chain:
+        for attempt in range(retries + 1):
+            try:
+                response = _gemini_client.models.generate_content(
+                    model=model,
+                    contents=full_prompt,
+                )
+                db.track_api_call("gemini", call_type=call_type)
+                if model != primary:
+                    logger.info(f"Used fallback Gemini model: {model}")
+                return response.text
+            except ClientError as e:
+                if e.code == 429:
+                    last_exc = e
+                    if attempt < retries:
+                        # Short pause to respect RPM before one same-model retry
+                        logger.warning(f"Gemini {model} rate-limited (attempt {attempt+1}/{retries+1}), waiting 3s...")
+                        time.sleep(3)
+                    # else: fall through to next model in chain
+                else:
+                    raise  # non-429 Gemini error — propagate immediately
+        logger.warning(f"Gemini model {model} exhausted (429) — trying next model")
+
+    # All Gemini models exhausted — fall back to Groq.
+    # PayloadTooLargeError must bubble up so the batch handler can reduce context.
     if Config.GROQ_API_KEY:
-        logger.warning("Gemini retries exhausted (429) — falling back to Groq")
+        logger.warning("All Gemini models rate-limited — falling back to Groq")
         return _ask_groq(prompt, call_type=call_type)
-    raise last_exc  # no Groq, re-raise
+    raise last_exc  # no Groq configured
 
 
 def _parse_json(text: str) -> dict:
@@ -322,80 +384,117 @@ Return ONLY valid JSON, no markdown."""
         }
 
 
-def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict, course_materials_map: dict = None, course_notes_map: dict = None, course_groups_map: dict = None) -> list:
-    """Analyze up to 15 assignments in a single API call (Gemini primary, Groq fallback).
+def _build_assignment_line(idx: int, a: dict, syllabus_rules_map: dict,
+                           course_materials_map: dict, course_notes_map: dict,
+                           course_groups_map: dict, now: datetime,
+                           reduced: bool = False) -> str:
+    """Build the prompt text for a single assignment within a batch.
 
-    Returns list of analysis dicts in the same order as the input assignments.
-    course_groups_map: {course_id: [{canvas_group_id, name, weight}, ...]}
+    reduced=True applies Groq-safe context limits:
+      - description capped at 400 chars (was 800+1500 for materials)
+      - course notes capped at 100 chars (was 400)
+      - syllabus rules capped at 200 chars (was full JSON)
+    This keeps per-assignment tokens well under Groq's window.
     """
-    if not assignments:
-        return []
+    due_at = a.get("due_at", "")
+    if due_at:
+        try:
+            due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+            days_until_due = (due_dt.replace(tzinfo=None) - now).days
+        except Exception:
+            days_until_due = 7
+    else:
+        days_until_due = 999
 
-    now = datetime.now()
+    rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
+    raw_desc = a.get("description") or ""
+    materials_dict = (course_materials_map or {}).get(str(a.get("course_id", "")), {})
+    if isinstance(materials_dict, dict):
+        materials = _find_relevant_materials(a.get("title", ""), materials_dict)
+    else:
+        materials = materials_dict  # backward compat
+    rubric = a.get("rubric_text", "")
+    course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
 
-    lines = []
-    for idx, a in enumerate(assignments):
-        due_at = a.get("due_at", "")
-        if due_at:
-            try:
-                due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-                days_until_due = (due_dt.replace(tzinfo=None) - now).days
-            except Exception:
-                days_until_due = 7
-        else:
-            days_until_due = 999
-
-        rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-        rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
-        raw_desc = a.get("description") or ""
-        materials_dict = (course_materials_map or {}).get(str(a.get("course_id", "")), {})
-        if isinstance(materials_dict, dict):
-            materials = _find_relevant_materials(a.get("title", ""), materials_dict)
-        else:
-            materials = materials_dict  # backward compat if string passed
-        rubric = a.get("rubric_text", "")
-        course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
-
-        # Resolve actual assignment group name and weight from Canvas data
-        groups = (course_groups_map or {}).get(str(a.get("course_id", "")), [])
-        group_info = next(
-            (g for g in groups if g.get("canvas_group_id") == a.get("canvas_group_id")),
-            None
+    groups = (course_groups_map or {}).get(str(a.get("course_id", "")), [])
+    group_info = next(
+        (g for g in groups if g.get("canvas_group_id") == a.get("canvas_group_id")),
+        None
+    )
+    if group_info and group_info.get("weight", 0) > 0:
+        grade_weight_line = (
+            f"Grade category: {group_info['name']} — worth {group_info['weight']:.0f}% of final grade"
         )
-        if group_info and group_info.get("weight", 0) > 0:
-            grade_weight_line = (
-                f"Grade category: {group_info['name']} — worth {group_info['weight']:.0f}% of final grade"
+    else:
+        grade_weight_line = "Grade category: Unknown (no group weight data)"
+
+    if reduced:
+        # Groq reduced-context mode: aggressively truncate everything
+        desc_limit = 400
+        materials_limit = 0  # skip materials entirely in reduced mode
+        notes_limit = 100
+        rules_limit = 200
+    else:
+        desc_limit = 800
+        materials_limit = 1500
+        notes_limit = 400
+        rules_limit = None  # no limit for Gemini
+
+    if _is_boilerplate_description(raw_desc):
+        if materials and not reduced:
+            desc = (
+                f"[Canvas description is a submission link only. Assignment content inferred "
+                f"from course materials below:]\n{materials[:2500]}"
             )
         else:
-            grade_weight_line = "Grade category: Unknown (no group weight data)"
+            desc = (
+                f"[No Canvas description. Infer from course '{a.get('course_name', '')}' "
+                f"and title '{a.get('title', '')}' using your academic knowledge.]"
+            )
+    else:
+        desc = raw_desc[:desc_limit]
+        if materials and materials_limit > 0:
+            desc += f"\n\nRelevant course materials:\n{materials[:materials_limit]}"
 
-        if _is_boilerplate_description(raw_desc):
-            if materials:
-                desc = f"[Canvas description is a submission link only. Assignment content inferred from course materials below:]\n{materials[:2500]}"
-            else:
-                desc = f"[No Canvas description and no matching course files found. Infer from course '{a.get('course_name', '')}' and title '{a.get('title', '')}' using your academic knowledge.]"
-        else:
-            desc = raw_desc[:800]
-            if materials:
-                desc += f"\n\nRelevant course materials:\n{materials[:1500]}"
+    notes_text = course_notes[:notes_limit] if course_notes else "None yet"
 
-        lines.append(
-            f"--- Assignment {idx + 1} ---\n"
-            f"Course: {a.get('course_name', 'Unknown')}\n"
-            f"Title: {a.get('title', 'Unknown')}\n"
-            f"Points: {a.get('points_possible', 'unknown')}\n"
-            f"Due: {due_at} ({days_until_due} days from now)\n"
-            f"Submission types: {a.get('submission_types', 'unknown')}\n"
-            f"{grade_weight_line}\n"
-            f"Description: {desc}\n"
-            f"Rubric (grading criteria): {rubric if rubric else 'Not available'}\n"
-            f"Course strategy notes: {course_notes[:400] if course_notes else 'None yet'}\n"
-            f"Syllabus rules: {rules_summary}"
+    if rules_limit is not None:
+        rules_text = json.dumps(rules)[:rules_limit] if rules else "No syllabus rules."
+    else:
+        rules_text = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
+
+    rubric_text = rubric[:200] if reduced and rubric else (rubric if rubric else "Not available")
+
+    return (
+        f"--- Assignment {idx + 1} ---\n"
+        f"Course: {a.get('course_name', 'Unknown')}\n"
+        f"Title: {a.get('title', 'Unknown')}\n"
+        f"Points: {a.get('points_possible', 'unknown')}\n"
+        f"Due: {due_at} ({days_until_due} days from now)\n"
+        f"Submission types: {a.get('submission_types', 'unknown')}\n"
+        f"{grade_weight_line}\n"
+        f"Description: {desc}\n"
+        f"Rubric (grading criteria): {rubric_text}\n"
+        f"Course strategy notes: {notes_text}\n"
+        f"Syllabus rules: {rules_text}"
+    )
+
+
+def _build_batch_prompt(assignments: list, syllabus_rules_map: dict,
+                        course_materials_map: dict, course_notes_map: dict,
+                        course_groups_map: dict, now: datetime,
+                        reduced: bool = False) -> str:
+    """Assemble the full batch analysis prompt."""
+    lines = [
+        _build_assignment_line(
+            idx, a, syllabus_rules_map, course_materials_map,
+            course_notes_map, course_groups_map, now, reduced=reduced
         )
-
+        for idx, a in enumerate(assignments)
+    ]
     batch_text = "\n\n".join(lines)
 
-    prompt = f"""You are Hermes, analyzing assignments for Niko, a college student at Ohio State University. He tends to procrastinate, but he's capable — your job is to give accurate, actionable analysis so he can get A grades.
+    return f"""You are Hermes, analyzing assignments for Niko, a college student at Ohio State University. He tends to procrastinate, but he's capable — your job is to give accurate, actionable analysis so he can get A grades.
 
 Analyze each of the following {len(assignments)} assignments and return a JSON array.
 
@@ -445,6 +544,27 @@ PRIORITY & DIFFICULTY CALIBRATION — hard rules, no exceptions:
 
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
+
+def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict,
+                               course_materials_map: dict = None,
+                               course_notes_map: dict = None,
+                               course_groups_map: dict = None) -> list:
+    """Analyze a list of assignments in a single API call (Gemini primary, Groq fallback).
+
+    Gemini can handle large batches (up to ~15); Groq is limited to GROQ_BATCH_SIZE (8)
+    assignments per call to stay within its ~6k-token per-request window.
+
+    When Gemini falls back to Groq and Groq returns HTTP 413 (payload too large), the
+    function automatically retries with reduced-context versions of the assignment text
+    rather than treating the error as a rate limit.
+
+    Returns a list of analysis dicts in the same order as the input assignments.
+    """
+    if not assignments:
+        return []
+
+    now = datetime.now()
+
     def _parse_batch_result(raw, count):
         text = raw.strip()
         if text.startswith("```"):
@@ -460,9 +580,9 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
             raise ValueError(f"Expected {count} results, got {len(results)}")
         return results
 
-    def _apply_start_by(results):
+    def _apply_start_by(results, batch_assignments):
         for i, analysis in enumerate(results):
-            due_at = assignments[i].get("due_at", "")
+            due_at = batch_assignments[i].get("due_at", "")
             if due_at and analysis.get("recommended_days_before_due") is not None:
                 try:
                     due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00")).replace(tzinfo=None)
@@ -496,49 +616,79 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
                     a["priority"] = "high"
         return results
 
-    # Try Gemini first (with Groq fallback inside _ask). On rate limit: wait 20s and
-    # retry once before giving up. A single 429 shouldn't permanently skip the batch —
-    # that was the root cause of 98 unanalyzed assignments in the original bug.
-    for _batch_attempt in range(2):
-        try:
-            raw = _ask(prompt)  # _ask already handles Gemini→Groq fallback internally
-            results = _parse_batch_result(raw, len(assignments))
-            return _enforce_calibration(_apply_start_by(results))
+    def _run_batch(batch: list, reduced: bool = False) -> list:
+        """Run analysis for a single sub-batch. Returns list of analysis dicts.
 
-        except ClientError as e:
-            if e.code == 429:
-                if _batch_attempt == 0:
-                    logger.warning(f"Batch rate-limited (Gemini 429) — waiting 20s before retry...")
-                    time.sleep(20)
-                    continue  # retry
-                logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(assignments)} assignments.")
-                return [_default_analysis() for _ in assignments]
-            logger.error(f"Batch API error ({e}), falling back to individual analysis")
-            break  # non-429 error → fall through to individual analysis
-        except Exception as e:
-            # Rate limit from Groq or any provider — wait and retry rather than immediately giving up
-            if "429" in str(e) or "rate_limit" in str(e).lower():
-                if _batch_attempt == 0:
-                    logger.warning(f"Batch rate-limited (provider 429) — waiting 20s before retry...")
-                    time.sleep(20)
-                    continue  # retry
-                logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(assignments)} assignments.")
-                return [_default_analysis() for _ in assignments]
-            logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
-            break  # non-rate-limit error → fall through to individual analysis
+        reduced=True uses truncated context (Groq 413 recovery mode).
+        """
+        prompt = _build_batch_prompt(
+            batch, syllabus_rules_map, course_materials_map,
+            course_notes_map, course_groups_map, now, reduced=reduced
+        )
 
-    # Parse/logic failure (not rate limit) — try individual analysis
-    fallback = []
-    for a in assignments:
-        rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-        result = analyze_assignment(a, rules, a.get("course_name", ""))
-        if result.get("_rate_limited"):
-            # Individual hit rate limit too — bail out of the loop
-            logger.warning(f"Individual fallback also rate-limited — stopping fallback loop.")
-            fallback.extend([_default_analysis() for _ in assignments[len(fallback):]])
-            break
-        fallback.append(result)
-    return _enforce_calibration(fallback)
+        for attempt in range(2):
+            try:
+                raw = _ask(prompt)
+                results = _parse_batch_result(raw, len(batch))
+                return _enforce_calibration(_apply_start_by(results, batch))
+
+            except PayloadTooLargeError:
+                # Groq rejected the payload. If we already have reduced context, nothing
+                # more we can do — return defaults for this sub-batch.
+                if reduced:
+                    logger.warning(
+                        f"Groq 413 even with reduced context ({len(batch)} assignments) "
+                        f"— returning defaults."
+                    )
+                    return [_default_analysis() for _ in batch]
+                # First encounter: retry with aggressively truncated context.
+                logger.warning(
+                    f"Groq 413 — retrying batch ({len(batch)} assignments) with reduced context"
+                )
+                return _run_batch(batch, reduced=True)
+
+            except ClientError as e:
+                if e.code == 429:
+                    if attempt == 0:
+                        logger.warning("Batch rate-limited (Gemini 429) — waiting 20s before retry...")
+                        time.sleep(20)
+                        continue
+                    logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(batch)} assignments.")
+                    return [_default_analysis() for _ in batch]
+                logger.error(f"Batch API error ({e}), falling back to individual analysis")
+                break  # non-429 → fall through to per-item fallback
+
+            except Exception as e:
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    if attempt == 0:
+                        logger.warning("Batch rate-limited (provider 429) — waiting 20s before retry...")
+                        time.sleep(20)
+                        continue
+                    logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(batch)} assignments.")
+                    return [_default_analysis() for _ in batch]
+                logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
+                break
+
+        # Parse/logic failure — try individual analysis as last resort
+        fallback = []
+        for a in batch:
+            rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
+            result = analyze_assignment(a, rules, a.get("course_name", ""))
+            if result.get("_rate_limited"):
+                logger.warning("Individual fallback also rate-limited — stopping fallback loop.")
+                fallback.extend([_default_analysis() for _ in batch[len(fallback):]])
+                break
+            fallback.append(result)
+        return _enforce_calibration(fallback)
+
+    # Split large batches into Groq-safe sub-batches and process each.
+    # We use GROQ_BATCH_SIZE as the cap even for Gemini to keep prompts manageable;
+    # Gemini can handle larger batches but smaller chunks reduce blast radius if one fails.
+    all_results = []
+    for start in range(0, len(assignments), GROQ_BATCH_SIZE):
+        chunk = assignments[start:start + GROQ_BATCH_SIZE]
+        all_results.extend(_run_batch(chunk))
+    return all_results
 
 
 def generate_grade_targets(courses_data: list) -> list:

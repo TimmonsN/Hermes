@@ -204,10 +204,38 @@ def sync_canvas():
     # per-batch exponential backoff (30s → 60s → skip) so one throttled batch
     # doesn't kill every subsequent batch.
     all_to_analyze = new_for_analysis + needs_reanalysis
+
+    # Sort by urgency so rate limits hit the least important assignments last.
+    # Mirrors the same ordering used in the re-analyze endpoint.
+    def _urgency_key(a):
+        title_lower = (a.get("title") or "").lower()
+        due_at = a.get("due_at") or ""
+        exam_kws = ("exam", "midterm", "final", "test", "quiz", "project")
+        is_high_stakes = any(kw in title_lower for kw in exam_kws)
+        try:
+            from datetime import datetime as _dt
+            due_dt = _dt.fromisoformat(due_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            days = (_dt.now() - due_dt).days * -1
+        except Exception:
+            days = 999
+        if days <= 3:
+            return 0
+        if is_high_stakes and days <= 30:
+            return 1
+        if days <= 7:
+            return 2
+        if days <= 14:
+            return 3
+        if is_high_stakes:
+            return 4
+        return 5
+
+    all_to_analyze.sort(key=_urgency_key)
+
     analyzed_count = 0
     skipped_count = 0
     if all_to_analyze:
-        BATCH_SIZE = 15
+        BATCH_SIZE = 8  # keep batches small to spread RPD across more successful calls
         chunks = [all_to_analyze[i:i + BATCH_SIZE] for i in range(0, len(all_to_analyze), BATCH_SIZE)]
         logger.info(f"Analyzing {len(all_to_analyze)} assignments in {len(chunks)} batch(es) of up to {BATCH_SIZE}...")
         for batch_num, chunk in enumerate(chunks, start=1):

@@ -208,6 +208,10 @@ def init_db():
         # BUG #2 fix: track analysis vs chat calls separately so the Alerts page
         # can show "12 analysis + 3 chat" instead of a raw undifferentiated number.
         "ALTER TABLE api_usage ADD COLUMN call_type TEXT DEFAULT 'analysis'",
+        # Phase 4A: track how many times analysis has been attempted so we can
+        # stop retrying assignments that persistently fail and show them as
+        # "analysis unavailable" instead of forever "analyzing...".
+        "ALTER TABLE assignments ADD COLUMN analysis_attempts INT DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
@@ -354,21 +358,37 @@ def upsert_assignment(data: dict):
     return assignment_id
 
 def store_analysis(assignment_id, analysis: dict):
+    """Persist an analysis result for an assignment.
+
+    If the result is a rate-limited placeholder (_rate_limited=True) we increment
+    analysis_attempts so the queue can eventually give up on persistently failing
+    assignments rather than retrying forever.
+    """
     conn = get_conn()
-    conn.execute("""
-        UPDATE assignments SET
-            difficulty=?, estimated_hours=?, start_by=?, priority=?,
-            has_early_bonus=?, early_bonus_details=?,
-            can_resubmit=?, resubmit_details=?,
-            analysis_json=?, updated_at=CURRENT_TIMESTAMP
-        WHERE id=?
-    """, (
-        analysis.get("difficulty"), analysis.get("estimated_hours"),
-        analysis.get("start_by"), analysis.get("priority","medium"),
-        int(analysis.get("has_early_bonus", False)), analysis.get("early_bonus_details",""),
-        int(analysis.get("can_resubmit", False)), analysis.get("resubmit_details",""),
-        json.dumps(analysis), assignment_id
-    ))
+    if analysis.get("_rate_limited"):
+        # Don't overwrite a real analysis with a placeholder, but do increment
+        # the attempt counter so the retry loop eventually backs off.
+        conn.execute("""
+            UPDATE assignments
+            SET analysis_attempts = COALESCE(analysis_attempts, 0) + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (assignment_id,))
+    else:
+        conn.execute("""
+            UPDATE assignments SET
+                difficulty=?, estimated_hours=?, start_by=?, priority=?,
+                has_early_bonus=?, early_bonus_details=?,
+                can_resubmit=?, resubmit_details=?,
+                analysis_json=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+        """, (
+            analysis.get("difficulty"), analysis.get("estimated_hours"),
+            analysis.get("start_by"), analysis.get("priority", "medium"),
+            int(analysis.get("has_early_bonus", False)), analysis.get("early_bonus_details", ""),
+            int(analysis.get("can_resubmit", False)), analysis.get("resubmit_details", ""),
+            json.dumps(analysis), assignment_id
+        ))
     conn.commit()
     conn.close()
 
@@ -406,16 +426,51 @@ def get_assignment_id_by_canvas_id(canvas_id):
     conn.close()
     return row["id"] if row else None
 
-def get_unanalyzed_assignments():
+def get_unanalyzed_assignments(max_attempts: int = 5):
+    """Return assignments that need analysis.
+
+    Excludes assignments that have been attempted >= max_attempts times without
+    success — these are shown as "analysis unavailable" in the UI rather than
+    stuck forever in "analyzing...".
+    """
     conn = get_conn()
     rows = conn.execute("""
         SELECT * FROM assignments
         WHERE analysis_json IS NULL
           AND due_at IS NOT NULL
           AND due_at >= datetime('now')
+          AND (analysis_attempts IS NULL OR analysis_attempts < ?)
+    """, (max_attempts,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_exhausted_analysis_assignments():
+    """Return assignments that have exceeded the max analysis retry limit.
+
+    These should be displayed as "analysis unavailable" with a manual retry button.
+    """
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM assignments
+        WHERE analysis_json IS NULL
+          AND due_at IS NOT NULL
+          AND due_at >= datetime('now')
+          AND analysis_attempts >= 5
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def reset_analysis_attempts(assignment_id: str):
+    """Reset the analysis_attempts counter so the assignment re-enters the queue."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE assignments SET analysis_attempts = 0 WHERE id = ?",
+        (assignment_id,)
+    )
+    conn.commit()
+    conn.close()
 
 def get_assignment_by_id(assignment_id):
     conn = get_conn()

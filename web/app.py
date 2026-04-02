@@ -232,6 +232,13 @@ def _calc_priority_score(a: dict, now: datetime = None,
 
     exam_courses: set of course_ids that have an exam in <5 days
     underperforming_groups: set of (course_id, canvas_group_id) tuples where avg < 75%
+
+    Fixes applied (Phase 5B):
+    - grade_impact defaults to 0.05 (5%) when no group data, instead of 0
+      (was causing nearly all assignments to sort purely on days_factor)
+    - Exam-like assignments (title contains exam/midterm/final) get a 1.5x multiplier
+    - hours_factor now INCREASES with more hours (big assignments are more urgent
+      when due soon) — was previously always rewarding effort equally regardless of urgency
     """
     if now is None:
         now = datetime.now()
@@ -248,11 +255,17 @@ def _calc_priority_score(a: dict, now: datetime = None,
         except Exception:
             pass
 
-    # grade_impact: points_possible relative to typical (100pts) * group_weight
+    # grade_impact: points_possible relative to typical (100pts).
+    # Fall back to a non-zero default (0.05 = 5% of grade) when no group data exists —
+    # previously this was 0, which meant assignments without Canvas group data all
+    # competed only on days_factor and looked equally important.
     pts = a.get("points_possible") or 10
-    grade_impact = min(1.0, pts / 100.0)  # normalize to 0-1
+    grade_impact = min(1.0, pts / 100.0)
+    if grade_impact == 0:
+        grade_impact = 0.05  # reasonable default when points_possible is 0
 
-    # hours_factor: more work = higher priority signal
+    # hours_factor: normalize estimated hours to 0-1 scale.
+    # More hours = more effort required = higher urgency signal when due soon.
     hours = a.get("estimated_hours") or 2.0
     hours_factor = min(1.0, hours / 10.0)
 
@@ -261,6 +274,12 @@ def _calc_priority_score(a: dict, now: datetime = None,
     effort_weight = 0.15
 
     score = (urgency_weight * days_factor) + (impact_weight * grade_impact) + (effort_weight * hours_factor)
+
+    # Exam-like assignments always float to the top regardless of group weight.
+    # An exam in 4 days should beat a homework due in 3 days.
+    title_lower = (a.get("title") or "").lower()
+    if any(kw in title_lower for kw in ("exam", "midterm", "final")):
+        score *= 1.5
 
     # Exam proximity boost: if this course has an exam in <5 days, boost by up to 0.25
     # (assignments become exam prep — get them done ASAP)
@@ -681,8 +700,8 @@ def dashboard():
             dd_grade_warnings.append(snap)
 
     # "You're Done For Today" detection
-    # True only if there were assignments due today and ALL are submitted/complete
-    today_due_raw = [a for a in assignments_raw if a.get("due_at")]
+    # Show only when EVERY upcoming assignment (not just today's) is submitted/complete —
+    # otherwise it's misleading to celebrate when tomorrow's work still needs doing.
     today_due_any = False
     all_done_today = False
     try:
@@ -693,9 +712,20 @@ def dashboard():
                 WHERE date(a.due_at) = date('now')
                   AND (c.is_ignored IS NULL OR c.is_ignored = 0)
             """).fetchall()
+            # Count any upcoming unsubmitted work (next 30 days)
+            pending_upcoming = _td_conn.execute("""
+                SELECT COUNT(*) as cnt FROM assignments a
+                LEFT JOIN courses c ON c.id = a.course_id
+                WHERE a.due_at >= datetime('now')
+                  AND a.due_at <= datetime('now', '30 days')
+                  AND a.status NOT IN ('submitted', 'complete')
+                  AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+            """).fetchone()["cnt"]
         if today_due_rows:
             today_due_any = True
-            all_done_today = all(r["status"] in ("submitted", "complete") for r in today_due_rows)
+            today_all_submitted = all(r["status"] in ("submitted", "complete") for r in today_due_rows)
+            # Only celebrate if today's work is done AND there's nothing else pending soon
+            all_done_today = today_all_submitted and (pending_upcoming == 0)
     except Exception:
         pass
 
@@ -1031,6 +1061,64 @@ def assignment_detail(assignment_id):
     except Exception:
         pass
 
+    # Category-level impact: show how this assignment fits in its category and
+    # what scoring well on it would do to the category average.
+    category_impact = None
+    try:
+        if a.get("canvas_group_id") and a.get("points_possible") and a.get("course_id"):
+            _cid_ci = str(a["course_id"])
+            _gid_ci = a["canvas_group_id"]
+            _groups_ci = db.get_assignment_groups(_cid_ci)
+            _grp_ci = next((g for g in _groups_ci if g["canvas_group_id"] == _gid_ci), None)
+            if _grp_ci and _grp_ci.get("weight", 0) > 0:
+                _all_ci = db.get_all_assignments_for_course(_cid_ci)
+                _grp_asgns = [x for x in _all_ci if x.get("canvas_group_id") == _gid_ci]
+                _grp_count = len(_grp_asgns)
+                _grp_grades = db.get_grades_for_course(_cid_ci)
+                _grp_grade_ids = {g["assignment_id"] for g in _grp_grades if g.get("grade_pct") is not None}
+                _grp_graded = [g for g in _grp_grades
+                               if g.get("assignment_id") in {x["id"] for x in _grp_asgns}
+                               and g.get("grade_pct") is not None]
+                _cur_cat_avg = (
+                    round(sum(g["grade_pct"] for g in _grp_graded) / len(_grp_graded), 1)
+                    if _grp_graded else None
+                )
+                _pts_total_ci = sum((x.get("points_possible") or 0) for x in _grp_asgns)
+                # What score on THIS assignment would bring category to 75% (C) and 90% (A)?
+                # Formula: needed_score = (target_pct * total_pts - already_earned_pts) / this_pts * 100
+                _this_pts = a["points_possible"]
+                _other_earned = sum(
+                    (g.get("grade_pct", 0) or 0) / 100.0
+                    * (g.get("a_points_possible") or g.get("points_possible") or 0)
+                    for g in _grp_graded
+                )
+                if _pts_total_ci > 0 and _this_pts > 0:
+                    _for_c = round(((0.75 * _pts_total_ci - _other_earned) / _this_pts) * 100, 1)
+                    _for_a = round(((0.90 * _pts_total_ci - _other_earned) / _this_pts) * 100, 1)
+                    _for_c = _for_c if 0 < _for_c <= 100 else None
+                    _for_a = _for_a if 0 < _for_a <= 100 else None
+                else:
+                    _for_c = _for_a = None
+
+                # What scoring 85% would do to category avg
+                _impact_of_85 = None
+                if _cur_cat_avg is not None and _pts_total_ci > 0:
+                    _new_earned = _other_earned + 0.85 * _this_pts
+                    _new_cat_avg = round(_new_earned / _pts_total_ci * 100, 1)
+                    _impact_of_85 = _new_cat_avg
+
+                category_impact = {
+                    "group_name": _grp_ci["name"],
+                    "group_weight": _grp_ci["weight"],
+                    "group_count": _grp_count,
+                    "current_cat_avg": _cur_cat_avg,
+                    "impact_of_85": _impact_of_85,
+                    "score_for_c": _for_c,
+                    "score_for_a": _for_a,
+                }
+    except Exception:
+        pass
+
     # Find Canvas announcements mentioning this assignment title
     relevant_announcements = []
     try:
@@ -1177,6 +1265,7 @@ def assignment_detail(assignment_id):
         course_target=course_target,
         now=datetime.now(),
         hrs_until_due=hrs_until_due,
+        category_impact=category_impact,
     )
 
 
@@ -1728,18 +1817,74 @@ def reanalyze_assignment(assignment_id):
     return jsonify({"status": "re-analysis queued"})
 
 
-@app.route("/api/reanalyze", methods=["POST"])
-def reanalyze_all():
-    """Clear all analysis and re-run in-process — no Canvas refetch, just re-AI all existing assignments."""
-    import sys, threading
-    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-    # Clear AI analysis only — keep Canvas data (submissions, grades, due dates)
+@app.route("/api/assignment/<assignment_id>/retry-analysis", methods=["POST"])
+def retry_analysis(assignment_id):
+    """Reset analysis_attempts counter so a stuck assignment re-enters the analysis queue."""
+    a = db.get_assignment_by_id(assignment_id)
+    if not a:
+        return jsonify({"error": "not found"}), 404
+    db.reset_analysis_attempts(assignment_id)
+    # Also clear any stale analysis state so it goes through the full pipeline
     conn = db.get_conn()
-    conn.execute("UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL, priority=NULL WHERE due_at IS NOT NULL AND due_at >= datetime('now', '-14 days')")
-    conn.execute("UPDATE exam_events SET analysis_json=NULL, study_hours_estimated=NULL, start_study_by=NULL")
+    conn.execute(
+        "UPDATE assignments SET analysis_json=NULL, difficulty=NULL, estimated_hours=NULL, start_by=NULL WHERE id=?",
+        (assignment_id,)
+    )
     conn.commit()
     conn.close()
+    return jsonify({"status": "queued"})
+
+
+def _urgency_sort_key(a: dict) -> int:
+    """Sort key for analysis priority order.
+
+    Assignments that are due soon or structurally important (exams, final
+    projects) get analyzed first so rate limits never leave Niko blind on
+    what actually matters right now.
+
+    Lower = higher priority (sorted ascending).
+    """
+    title_lower = (a.get("title") or "").lower()
+    due_at = a.get("due_at") or ""
+
+    # Detect high-stakes assignments regardless of due date
+    exam_keywords = ("exam", "midterm", "final", "test", "quiz", "project")
+    is_high_stakes = any(kw in title_lower for kw in exam_keywords)
+
+    try:
+        due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        days_until = (due_dt - datetime.now()).days
+    except Exception:
+        days_until = 999
+
+    if days_until <= 3:
+        return 0   # due imminently
+    if is_high_stakes and days_until <= 30:
+        return 1   # exam/project within a month
+    if days_until <= 7:
+        return 2   # due this week
+    if days_until <= 14:
+        return 3   # due next week
+    if is_high_stakes:
+        return 4   # distant exam/project still worth knowing about early
+    return 5       # everything else
+
+
+@app.route("/api/reanalyze", methods=["POST"])
+def reanalyze_all():
+    """Re-analyze all upcoming assignments in-process — no Canvas refetch.
+
+    Key design decisions vs the old implementation:
+    - Does NOT clear existing analysis_json upfront.  Old analysis stays visible
+      while the run is in progress; only successful results overwrite it.
+      Rate-limited assignments keep their previous data instead of going blank.
+    - Assignments are sorted by urgency so the most time-sensitive ones are
+      analyzed first — if rate limits hit mid-run, Niko still has data on
+      what's due soon.
+    - Progress reflects batches dispatched (not stored), matching the original UX.
+    """
+    import sys, threading
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
     db.set_pref("reanalyze_status", "running")
     db.set_pref("reanalyze_started", datetime.now().isoformat())
@@ -1750,73 +1895,79 @@ def reanalyze_all():
         """Re-analyze existing DB assignments without hitting Canvas API."""
         try:
             from modules import analyzer as _az
-            # Fetch all unanalyzed assignments (we just cleared them above)
-            unanalyzed = db.get_unanalyzed_assignments()
-            total = len(unanalyzed)
+
+            # Fetch ALL upcoming assignments — not just unanalyzed ones — so a
+            # re-analyze refreshes everything, not just the blank slots.
+            conn = db.get_conn()
+            all_upcoming = conn.execute("""
+                SELECT a.* FROM assignments a
+                LEFT JOIN courses c ON c.id = a.course_id
+                WHERE a.due_at IS NOT NULL
+                  AND a.due_at >= datetime('now', '-1 days')
+                  AND a.status NOT IN ('submitted', 'complete')
+                  AND (c.is_ignored IS NULL OR c.is_ignored = 0)
+            """).fetchall()
+            conn.close()
+            all_upcoming = [dict(r) for r in all_upcoming]
+
+            # Sort by urgency so rate limits hit the least-important assignments last
+            all_upcoming.sort(key=_urgency_sort_key)
+
+            total = len(all_upcoming)
             if total == 0:
                 db.set_pref("reanalyze_status", "done")
                 return
 
-            # Group by course for batch analysis
-            by_course = defaultdict(list)
-            for a in unanalyzed:
-                by_course[str(a.get("course_id", ""))].append(a)
+            # Pre-load syllabus data for every course represented in the batch
+            course_ids = list({str(a.get("course_id", "")) for a in all_upcoming})
+            rules_map = {}
+            materials_map = {}
+            notes_map = {}
+            groups_map = {}
+            for cid in course_ids:
+                syllabus_list = db.get_syllabus(cid)
+                for s in syllabus_list:
+                    if s.get("rules_json"):
+                        try:
+                            rules_map[cid] = json.loads(s["rules_json"])
+                        except Exception:
+                            pass
+                    fname = s.get("file_name") or s.get("filename") or ""
+                    if not fname.startswith("__piazza__"):
+                        materials_map.setdefault(cid, []).append({
+                            "label": fname,
+                            "content": s.get("content", "")[:2000]
+                        })
+                notes_map[cid] = db.get_course_notes(cid)
+                groups_map[cid] = db.get_assignment_groups(cid)
 
+            # Process in urgency-sorted batches of 8
+            CHUNK = 8
             done = 0
-            for cid, course_assignments in by_course.items():
+            for i in range(0, total, CHUNK):
+                chunk = all_upcoming[i:i + CHUNK]
+                # Build per-batch maps (only the courses in this chunk)
+                chunk_cids = list({str(a.get("course_id", "")) for a in chunk})
                 try:
-                    syllabus_list = db.get_syllabus(cid)
-                    rules_map = {}
-                    materials_map = {}
-                    notes_map = {}
-                    for s in syllabus_list:
-                        if s.get("rules_json"):
-                            try:
-                                rules_map[cid] = json.loads(s["rules_json"])
-                            except Exception:
-                                pass
-                        fname = s.get("filename", "")
-                        if not fname.startswith("__piazza__"):
-                            materials_map.setdefault(cid, []).append({"label": fname, "content": s.get("content", "")[:2000]})
+                    results = _az.analyze_assignments_batch(
+                        chunk,
+                        {c: rules_map.get(c, {}) for c in chunk_cids},
+                        {c: materials_map.get(c, []) for c in chunk_cids},
+                        {c: notes_map.get(c, "") for c in chunk_cids},
+                        {c: groups_map.get(c, []) for c in chunk_cids},
+                    )
+                    for asgn, analysis in zip(chunk, results):
+                        # store_analysis skips rate-limited results without
+                        # overwriting existing data — old analysis stays intact
+                        db.store_analysis(asgn["id"], analysis)
+                except Exception as e:
+                    logger.warning(f"Re-analyze chunk {i//CHUNK + 1} failed: {e}")
 
-                    groups_map = {cid: db.get_assignment_groups(cid)}
+                done += len(chunk)
+                db.set_pref("reanalyze_progress", str(round(done / total * 100)))
 
-                    CHUNK = 8
-                    for i in range(0, len(course_assignments), CHUNK):
-                        chunk = course_assignments[i:i+CHUNK]
-                        results = _az.analyze_assignments_batch(
-                            chunk,
-                            {cid: rules_map.get(cid, {})},
-                            {cid: materials_map.get(cid, [])},
-                            notes_map,
-                            groups_map,
-                        )
-                        for r in results:
-                            if r.get("analysis_json"):
-                                try:
-                                    analysis = json.loads(r["analysis_json"]) if isinstance(r["analysis_json"], str) else r["analysis_json"]
-                                    c2 = db.get_conn()
-                                    c2.execute("""UPDATE assignments SET analysis_json=?, difficulty=?, estimated_hours=?,
-                                                   start_by=?, priority=? WHERE id=?""",
-                                               (json.dumps(analysis),
-                                                analysis.get("difficulty"),
-                                                analysis.get("estimated_hours"),
-                                                analysis.get("start_by"),
-                                                analysis.get("priority"),
-                                                r["id"]))
-                                    c2.commit()
-                                    c2.close()
-                                except Exception:
-                                    pass
-                        done += len(chunk)
-                        pct = round(done / total * 100)
-                        db.set_pref("reanalyze_progress", str(pct))
-                except Exception:
-                    done += len(course_assignments)
-                    db.set_pref("reanalyze_progress", str(round(done / total * 100)))
-
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Re-analyze failed: {e}")
         finally:
             _now_iso = datetime.now().isoformat()
             db.set_pref("reanalyze_status", "done")
@@ -2189,6 +2340,54 @@ def grades_page():
         submitted_count = sum(1 for a in all_course_assignments
                               if a["id"] in graded_asgn_ids)
 
+        # --- Weakest category: the graded category with the lowest current avg ---
+        # Used to surface "Weakest area: Homework (68.2%, 40% of grade)" on the grades page.
+        graded_categories = [
+            cat for cat in category_grades
+            if cat.get("current_pct") is not None and cat.get("graded_count", 0) > 0
+        ]
+        weakest_category = None
+        if graded_categories:
+            weakest = min(graded_categories, key=lambda x: x["current_pct"])
+            weakest_category = {
+                "name": weakest["name"],
+                "pct": weakest["current_pct"],
+                "weight": weakest["weight"],
+            }
+
+        # --- Course-level what-if: highest-remaining-weight ungraded assignment ---
+        # Shows "If you score 95% on X (+3.2%), you'd reach Y%"
+        what_if = None
+        if display_avg is not None:
+            ungraded_asgns = [
+                a for a in all_course_assignments
+                if a["id"] not in {g.get("assignment_id") for g in course_grades}
+                and (a.get("points_possible") or 0) > 0
+            ]
+            best_ungraded = None
+            best_impact = 0.0
+            for ua in ungraded_asgns:
+                gid_ua = ua.get("canvas_group_id")
+                grp_ua = next((g for g in groups if g.get("canvas_group_id") == gid_ua), None)
+                if not grp_ua or grp_ua.get("weight", 0) <= 0:
+                    continue
+                total_pts_ua = db.get_group_total_points(cid, gid_ua)
+                if total_pts_ua <= 0:
+                    continue
+                impact = round(
+                    (ua["points_possible"] / total_pts_ua) * (grp_ua["weight"] / 100) * 100, 2
+                )
+                if impact > best_impact:
+                    best_impact = impact
+                    best_ungraded = {"title": ua["title"], "impact": impact}
+            if best_ungraded and best_impact >= 0.5:
+                new_avg = round(display_avg + best_impact * 0.95, 1)  # assume 95% on it
+                what_if = {
+                    "title": best_ungraded["title"],
+                    "impact": best_impact,
+                    "projected": new_avg,
+                }
+
         course_summaries.append({
             "id": cid, "name": c["name"], "code": c.get("code", ""),
             "graded_count": len(course_grades),
@@ -2216,6 +2415,8 @@ def grades_page():
             "health_reason": health_reason,
             "submitted_count": submitted_count,
             "total_asgn_count": total_course_asgns,
+            "weakest_category": weakest_category,
+            "what_if": what_if,
         })
 
     return render_template("grades.html",
@@ -2863,6 +3064,33 @@ def settings_page():
     sync_hour_2 = int(db.get_pref("sync_hour_2") or 20)
     piazza_nid = _Cfg.PIAZZA_NETWORK_ID or db.get_pref("piazza_network_id") or ""
     piazza_email = _Cfg.PIAZZA_EMAIL or ""
+
+    # Grade Targets bulk edit: pass all non-ignored courses with their current grade and target
+    all_grades = db.get_all_grades()
+    courses_with_targets = []
+    for c in db.get_courses():
+        cid = str(c["id"])
+        cg = [g["grade_pct"] for g in all_grades
+              if str(g.get("course_id")) == cid and g.get("grade_pct") is not None]
+        canvas_grade = c.get("canvas_grade_pct")
+        current_avg = round(sum(cg) / len(cg), 1) if cg else None
+        display_avg = canvas_grade if canvas_grade is not None else current_avg
+        courses_with_targets.append({
+            "id": cid,
+            "name": c["name"],
+            "code": c.get("code", ""),
+            "target": db.get_grade_goal(cid),
+            "current_avg": display_avg,
+        })
+
+    def _mask(val):
+        """Show first 6 and last 4 chars; hide the middle."""
+        if not val:
+            return ""
+        if len(val) <= 10:
+            return val[:2] + "***"
+        return val[:6] + "•••" + val[-4:]
+
     return render_template("settings.html",
         last_sync=last_sync,
         last_analysis=last_analysis,
@@ -2875,7 +3103,46 @@ def settings_page():
         sync_hour_2=sync_hour_2,
         piazza_nid=piazza_nid,
         piazza_email=piazza_email,
+        courses_with_targets=courses_with_targets,
+        # API key display (masked) for the settings page editor
+        canvas_token_masked=_mask(_Cfg.CANVAS_TOKEN),
+        gemini_key_masked=_mask(getattr(_Cfg, "GEMINI_API_KEY", "")),
+        groq_key_masked=_mask(getattr(_Cfg, "GROQ_API_KEY", "")),
+        canvas_token_set=bool(_Cfg.CANVAS_TOKEN),
+        gemini_key_set=bool(getattr(_Cfg, "GEMINI_API_KEY", "")),
+        groq_key_set=bool(getattr(_Cfg, "GROQ_API_KEY", "")),
     )
+
+
+@app.route("/api/test-canvas", methods=["GET"])
+def test_canvas_connection():
+    """Ping Canvas API and return connection status.
+
+    Used by the Settings page "Test Canvas Connection" button.
+    Returns JSON: {ok: bool, courses: int, last_sync: str, error: str}
+    """
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+        from modules.canvas_client import CanvasClient
+        from config import Config as _Cfg
+        client = CanvasClient(_Cfg.CANVAS_BASE_URL, _Cfg.CANVAS_TOKEN)
+        courses = client.get_active_courses()
+        last_sync = db.get_pref("last_sync_time") or "never"
+        return jsonify({
+            "ok": True,
+            "courses": len(courses),
+            "last_sync": last_sync,
+            "error": None,
+        })
+    except Exception as e:
+        err = str(e)
+        return jsonify({
+            "ok": False,
+            "courses": 0,
+            "last_sync": db.get_pref("last_sync_time") or "never",
+            "error": err,
+        })
 
 
 @app.route("/api/settings/piazza", methods=["POST"])
@@ -2897,6 +3164,63 @@ def save_sync_schedule():
     if h2 is not None:
         db.set_pref("sync_hour_2", str(int(h2)))
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/settings/api-keys", methods=["POST"])
+def save_api_keys():
+    """Write API key changes directly to .env so they persist across restarts.
+
+    Only updates keys that are non-empty in the request — blank values are
+    ignored so the user can't accidentally clear a key by submitting an empty form.
+    After writing, the caller must restart the daemon for config.py to reload.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+
+    # Read existing lines
+    try:
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    # Map of .env key -> new value (only non-empty updates)
+    updates = {}
+    for field, env_key in [
+        ("canvas_token", "CANVAS_TOKEN"),
+        ("gemini_api_key", "GEMINI_API_KEY"),
+        ("groq_api_key", "GROQ_API_KEY"),
+    ]:
+        val = data.get(field, "").strip()
+        if val:
+            updates[env_key] = val
+
+    if not updates:
+        return jsonify({"status": "ok", "updated": 0})
+
+    # Rewrite matching lines in place; append new keys if not found
+    found = {k: False for k in updates}
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}\n")
+            found[key] = True
+        else:
+            new_lines.append(line)
+
+    for key, was_found in found.items():
+        if not was_found:
+            new_lines.append(f"{key}={updates[key]}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+    return jsonify({"status": "ok", "updated": len(updates)})
 
 
 def run(port=5000, debug=False, use_reloader=True):

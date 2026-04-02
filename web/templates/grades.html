@@ -264,6 +264,23 @@
     {% endfor %}
   </div>
   {% endif %}
+
+  {# Weakest category callout — shown in orange when there's a graded weak spot #}
+  {% if c.weakest_category and c.weakest_category.pct is not none and c.weakest_category.pct < 80 %}
+  <div style="margin-top:10px; padding:8px 12px; border-radius:8px; background:rgba(251,146,60,0.08); border:1px solid rgba(251,146,60,0.25); font-size:12px; color:var(--orange);">
+    Weakest area: <strong>{{ c.weakest_category.name }}</strong>
+    ({{ c.weakest_category.pct }}% avg, {{ c.weakest_category.weight|int }}% of grade)
+    — focus here to move your overall grade.
+  </div>
+  {% endif %}
+
+  {# What-if: single best ungraded assignment to boost overall grade #}
+  {% if c.what_if and c.on_track is sameas false %}
+  <div style="margin-top:8px; padding:8px 12px; border-radius:8px; background:rgba(139,92,246,0.06); border:1px solid rgba(139,92,246,0.2); font-size:12px; color:var(--accent);">
+    If you score 95% on <strong>{{ c.what_if.title }}</strong>
+    (+{{ c.what_if.impact }}%), you'd reach <strong>{{ c.what_if.projected }}%</strong>.
+  </div>
+  {% endif %}
 </div>
 {% endfor %}
 

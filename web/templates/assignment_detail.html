@@ -391,6 +391,29 @@
 </div>
 {% endif %}
 
+{# Category context: show how this assignment fits within its grade category #}
+{% if category_impact %}
+<div class="bonus-block" style="background:rgba(251,191,36,0.05); border-color:rgba(251,191,36,0.2); font-size:13px;">
+  <strong>Category Context</strong> — This assignment is 1 of {{ category_impact.group_count }}
+  in <strong>{{ category_impact.group_name }}</strong>
+  ({{ category_impact.group_weight|int }}% of grade).
+  {% if category_impact.current_cat_avg is not none %}
+    Your current {{ category_impact.group_name }} avg is
+    <span style="color:{% if category_impact.current_cat_avg >= 90 %}var(--green){% elif category_impact.current_cat_avg >= 80 %}var(--yellow){% else %}var(--red){% endif %}; font-weight:600;">{{ category_impact.current_cat_avg }}%</span>.
+    {% if category_impact.impact_of_85 is not none %}
+      Scoring 85%+ here would bring it to
+      <span style="color:{% if category_impact.impact_of_85 >= 90 %}var(--green){% elif category_impact.impact_of_85 >= 80 %}var(--yellow){% else %}var(--orange){% endif %}; font-weight:600;">{{ category_impact.impact_of_85 }}%</span>.
+    {% endif %}
+  {% endif %}
+  {% if category_impact.score_for_c is not none or category_impact.score_for_a is not none %}
+  <div style="margin-top:6px; color:var(--muted);">
+    {% if category_impact.score_for_c is not none %}Score <strong>{{ category_impact.score_for_c }}%</strong> to bring category to a C (75%). {% endif %}
+    {% if category_impact.score_for_a is not none %}Score <strong>{{ category_impact.score_for_a }}%</strong> to bring category to an A (90%).{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if grade_obj %}
 <div class="info-block" style="border-color:rgba(74,222,128,0.25);">
   <h3>Grade</h3>
