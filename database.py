@@ -219,6 +219,31 @@ def init_db():
         except Exception:
             pass  # column already exists
 
+    # Fix api_usage UNIQUE constraint. The original table had UNIQUE(provider, date);
+    # ALTER TABLE can add a column but can't change the constraint. Rebuild if needed.
+    schema_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='api_usage'"
+    ).fetchone()
+    if schema_row:
+        schema_sql = schema_row[0].replace(' ', '').replace('\n', '')
+        if 'UNIQUE(provider,date,call_type)' not in schema_sql:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS api_usage_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT, date TEXT,
+                    call_type TEXT DEFAULT 'analysis',
+                    calls INTEGER DEFAULT 0,
+                    UNIQUE(provider, date, call_type)
+                )
+            """)
+            conn.execute("""
+                INSERT OR IGNORE INTO api_usage_v2 (provider, date, call_type, calls)
+                SELECT provider, date, COALESCE(call_type, 'analysis'), calls FROM api_usage
+            """)
+            conn.execute("DROP TABLE api_usage")
+            conn.execute("ALTER TABLE api_usage_v2 RENAME TO api_usage")
+            conn.commit()
+
     conn.close()
 
 # --- Courses ---
@@ -888,8 +913,10 @@ def track_api_call(provider: str, call_type: str = "analysis"):
     conn = get_conn()
     today = datetime.now().strftime("%Y-%m-%d")
     conn.execute("""
-        INSERT INTO api_usage (provider, date, call_type, calls) VALUES (?, ?, ?, 1)
-        ON CONFLICT(provider, date, call_type) DO UPDATE SET calls = calls + 1
+        INSERT OR IGNORE INTO api_usage (provider, date, call_type, calls) VALUES (?, ?, ?, 0)
+    """, (provider, today, call_type))
+    conn.execute("""
+        UPDATE api_usage SET calls = calls + 1 WHERE provider=? AND date=? AND call_type=?
     """, (provider, today, call_type))
     conn.commit()
     conn.close()
