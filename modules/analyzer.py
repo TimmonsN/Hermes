@@ -1,12 +1,111 @@
 import json
 import logging
+import re
+import time
 from datetime import datetime, timedelta
 from google import genai
+from google.genai.errors import ClientError
 from config import Config
+import database as db
 
 logger = logging.getLogger("hermes.analyzer")
 
-_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+_gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+_groq_client = None
+
+# Default batch size for Groq — much smaller than Gemini because Groq has a
+# tighter context window (~6k tokens per request vs Gemini's 1M).
+GROQ_BATCH_SIZE = 8
+
+
+class PayloadTooLargeError(Exception):
+    """Raised when a provider rejects our request because the payload exceeds its limit.
+
+    Unlike a 429 rate limit this is NOT a transient error — retrying the same
+    payload will fail again.  The caller must reduce the context and retry.
+    """
+
+# Phrases that indicate a Canvas submission placeholder, not a real description
+_BOILERPLATE_PHRASES = [
+    "please use this to submit",
+    "use this assignment to submit",
+    "use this to submit",
+    "submit your completed",
+    "submit your assignment",
+    "assignment submission",
+    "submit here",
+    "upload your",
+    "submit via",
+    "this is where you",
+]
+
+_MATERIAL_STOP = {'with','this','that','from','have','will','assignment','homework',
+                  'worksheet','reflection','discussion','quiz','exam','project','lab',
+                  'and','the','for','not','are','but','you','your'}
+
+def _find_relevant_materials(title: str, materials_dict: dict, max_chars: int = 3000) -> str:
+    """Return content from files most relevant to this assignment title."""
+    if not materials_dict:
+        return ""
+    keywords = [w for w in re.split(r'\W+', title.lower()) if len(w) > 3 and w not in _MATERIAL_STOP]
+    if not keywords:
+        return ""
+
+    scored = []
+    for fname, content in materials_dict.items():
+        fname_lower = fname.lower()
+        score = sum(1 for kw in keywords if kw in fname_lower)
+        if score > 0:
+            scored.append((score, fname, content))
+
+    if not scored:
+        return ""
+
+    max_score = max(s for s, _, _ in scored)
+    best = [(fname, content) for s, fname, content in scored if s == max_score]
+
+    parts = []
+    total = 0
+    for fname, content in best[:2]:
+        if total >= max_chars:
+            break
+        snippet = content[:max_chars - total]
+        parts.append(f"[{fname}]\n{snippet.strip()}")
+        total += len(snippet)
+    return "\n\n".join(parts)
+
+
+def _is_boilerplate_description(description: str) -> bool:
+    """Return True if the description is a Canvas submission placeholder, not real content."""
+    if not description:
+        return True
+    clean = re.sub(r'<[^>]+>', ' ', description)
+    clean = re.sub(r'&\w+;', ' ', clean)
+    clean = re.sub(r'\s+', ' ', clean).strip().lower()
+    if len(clean) < 40:
+        return True
+    return any(phrase in clean for phrase in _BOILERPLATE_PHRASES)
+
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None and Config.GROQ_API_KEY:
+        from groq import Groq
+        _groq_client = Groq(api_key=Config.GROQ_API_KEY)
+    return _groq_client
+
+
+def _default_analysis():
+    """Placeholder returned when all AI is unavailable. NOT stored to DB — triggers retry next sync."""
+    return {
+        "difficulty": None, "estimated_hours": None, "priority": "medium",
+        "has_early_bonus": False, "early_bonus_details": "",
+        "can_resubmit": False, "resubmit_details": "",
+        "recommended_days_before_due": Config.BUFFER_DAYS,
+        "start_by": None, "reasoning": None,
+        "_rate_limited": True,
+    }
+
 
 HERMES_PERSONA = """You are Hermes, an AI academic assistant for a college student at Ohio State University.
 Your job is to analyze assignments, understand class rules, and help the student get the best grades possible.
@@ -14,14 +113,120 @@ Be direct, practical, and fight for the student's success. The student tends to 
 Always respond with valid JSON when asked for structured analysis."""
 
 
-def _ask(prompt: str) -> str:
-    """Send a prompt to Gemini and return the text response."""
+HERMES_CHAT_PERSONA = """You are Hermes, Niko's AI school buddy at Ohio State. You have full context on his assignments, exams, and grades.
+
+Hard rules:
+- Answer the exact question asked. Lead with the answer — no preamble, no greeting.
+- Keep responses to 2-4 sentences unless he explicitly asks for detail.
+- Never repeat what you just said. Never re-summarize his situation back to him.
+- If you don't know something specific (like the exact assignment rubric), say so plainly and tell him where to find it. Don't make things up or pivot to something else.
+- Don't add unsolicited advice after answering — if he wants more, he'll ask.
+- Be warm but not sycophantic. No "Great question!" or "Absolutely!"."""
+
+def _ask_groq(prompt: str, model: str = None, system_prompt: str = None,
+              call_type: str = "analysis") -> str:
+    """Send a prompt to Groq and return the text response.
+
+    call_type: "analysis" (batch/single assignment AI) or "chat" (conversational).
+    Used for per-type usage tracking on the Alerts page.
+
+    Raises:
+        PayloadTooLargeError — if Groq returns HTTP 413 (payload too large).
+            This is NOT a rate limit; the caller must reduce context and retry.
+        RuntimeError — if Groq is not configured.
+    """
+    client = _get_groq_client()
+    if not client:
+        raise RuntimeError("Groq not configured — set GROQ_API_KEY")
+    use_model = model or Config.GROQ_MODEL_ANALYSIS
+    sys_msg = system_prompt or HERMES_PERSONA
+    try:
+        response = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+    except Exception as e:
+        # Groq SDK wraps HTTP errors — check for 413 (payload too large).
+        # The error message/type varies by SDK version so we check broadly.
+        err_str = str(e)
+        if "413" in err_str or "request_too_large" in err_str.lower() or "payload too large" in err_str.lower() or "too_large" in err_str.lower():
+            raise PayloadTooLargeError(f"Groq rejected payload as too large: {e}") from e
+        raise
+    db.track_api_call("groq", call_type=call_type)
+    return response.choices[0].message.content
+
+
+# Gemini model fallback chain for analysis.  When the primary model (set in
+# Config.GEMINI_MODEL / .env GEMINI_MODEL) is rate-limited we roll through these
+# in order before giving up on Gemini entirely and falling to Groq.  Each model
+# has its own independent RPD/RPM budget on the same free-tier API key, so
+# rotating across them multiplies how many batches we can complete per day.
+#
+# Free-tier limits (approx, as of 2026-04):
+#   gemini-2.5-flash       : 10 RPM, 250K TPM, 500 RPD
+#   gemini-2.0-flash       : 15 RPM, 1M   TPM, 1500 RPD
+#   gemini-1.5-flash       : 15 RPM, 1M   TPM, 1500 RPD
+#   gemini-1.5-flash-8b    : 15 RPM, 1M   TPM, 1500 RPD
+_GEMINI_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
+
+
+def _ask(prompt: str, retries: int = 1, call_type: str = "analysis") -> str:
+    """Send a prompt to Gemini with multi-model fallback, then Groq.
+
+    Strategy:
+      1. Try Config.GEMINI_MODEL (primary — highest capability).
+      2. On 429, immediately try the next model in _GEMINI_FALLBACK_MODELS rather
+         than sleeping — each model has its own budget so there's no point waiting.
+      3. Only sleep briefly (3s) between same-model retries to respect RPM limits.
+      4. If all Gemini models are exhausted, fall to Groq.
+
+    call_type: "analysis" or "chat" — passed to usage tracking.
+    """
     full_prompt = f"{HERMES_PERSONA}\n\n{prompt}"
-    response = _client.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=full_prompt
-    )
-    return response.text
+
+    # Build the ordered list: primary first, then fallbacks (deduplicated)
+    primary = Config.GEMINI_MODEL
+    model_chain = [primary] + [m for m in _GEMINI_FALLBACK_MODELS if m != primary]
+
+    last_exc = None
+    for model in model_chain:
+        for attempt in range(retries + 1):
+            try:
+                response = _gemini_client.models.generate_content(
+                    model=model,
+                    contents=full_prompt,
+                )
+                db.track_api_call("gemini", call_type=call_type)
+                if model != primary:
+                    logger.info(f"Used fallback Gemini model: {model}")
+                return response.text
+            except ClientError as e:
+                if e.code == 429:
+                    last_exc = e
+                    if attempt < retries:
+                        # Short pause to respect RPM before one same-model retry
+                        logger.warning(f"Gemini {model} rate-limited (attempt {attempt+1}/{retries+1}), waiting 3s...")
+                        time.sleep(3)
+                    # else: fall through to next model in chain
+                else:
+                    raise  # non-429 Gemini error — propagate immediately
+        logger.warning(f"Gemini model {model} exhausted (429) — trying next model")
+
+    # All Gemini models exhausted — fall back to Groq.
+    # PayloadTooLargeError must bubble up so the batch handler can reduce context.
+    if Config.GROQ_API_KEY:
+        logger.warning("All Gemini models rate-limited — falling back to Groq")
+        return _ask_groq(prompt, call_type=call_type)
+    raise last_exc  # no Groq configured
 
 
 def _parse_json(text: str) -> dict:
@@ -71,6 +276,31 @@ Return ONLY valid JSON, no markdown."""
     except Exception as e:
         logger.error(f"Syllabus rules extraction failed: {e}")
         return {}
+
+
+def generate_course_notes(course_name: str, syllabus_content: str, rules: dict, grade_context: str = "") -> str:
+    """Generate strategic course notes that Hermes uses as persistent memory for this course."""
+    rules_summary = json.dumps(rules, indent=2) if rules else "No structured rules extracted."
+    prompt = f"""You are Hermes analyzing a course to build persistent strategic notes.
+
+Course: {course_name}
+{grade_context}
+
+Syllabus/materials content:
+{syllabus_content[:3000]}
+
+Extracted rules:
+{rules_summary[:1000]}
+
+Write 3-5 sentences of dense, strategic notes that will help you give better advice on assignments for this course.
+Focus on: grading weights (what matters most), assignment patterns, late/resubmit policies, any known professor quirks, and what typically causes students to lose points.
+Be specific and factual — these notes are your memory of this course. Write in first person as Hermes.
+Return plain text, no JSON, no headers."""
+    try:
+        return _ask(prompt)
+    except Exception as e:
+        logger.error(f"generate_course_notes failed for {course_name}: {e}")
+        return ""
 
 
 def analyze_assignment(assignment: dict, syllabus_rules: dict, course_name: str) -> dict:
@@ -140,89 +370,202 @@ Return ONLY valid JSON, no markdown."""
 
         return analysis
     except Exception as e:
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            logger.warning(f"Assignment analysis rate-limited for '{assignment.get('title')}' — will retry next sync.")
+            return _default_analysis()
         logger.error(f"Assignment analysis failed for '{assignment.get('title')}': {e}")
         return {
             "difficulty": 5, "estimated_hours": 2.0, "priority": "medium",
             "has_early_bonus": False, "early_bonus_details": "",
             "can_resubmit": False, "resubmit_details": "",
             "recommended_days_before_due": Config.BUFFER_DAYS,
-            "start_by": None, "reasoning": "Analysis failed — using defaults."
+            "start_by": None, "reasoning": "Analysis failed — using defaults.",
+            "_rate_limited": True,
         }
 
 
-def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict) -> list:
-    """Analyze up to 15 assignments in a single Gemini API call.
+def _build_assignment_line(idx: int, a: dict, syllabus_rules_map: dict,
+                           course_materials_map: dict, course_notes_map: dict,
+                           course_groups_map: dict, now: datetime,
+                           reduced: bool = False) -> str:
+    """Build the prompt text for a single assignment within a batch.
 
-    Args:
-        assignments: list of assignment dicts (same shape as used by analyze_assignment)
-        syllabus_rules_map: dict mapping course_id -> syllabus rules dict
-
-    Returns:
-        list of analysis dicts in the same order as the input assignments.
-        Falls back to individual analysis per assignment if batch parsing fails.
+    reduced=True applies Groq-safe context limits:
+      - description capped at 400 chars (was 800+1500 for materials)
+      - course notes capped at 100 chars (was 400)
+      - syllabus rules capped at 200 chars (was full JSON)
+    This keeps per-assignment tokens well under Groq's window.
     """
-    if not assignments:
-        return []
+    due_at = a.get("due_at", "")
+    if due_at:
+        try:
+            due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+            days_until_due = (due_dt.replace(tzinfo=None) - now).days
+        except Exception:
+            days_until_due = 7
+    else:
+        days_until_due = 999
 
-    now = datetime.now()
+    rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
+    raw_desc = a.get("description") or ""
+    materials_dict = (course_materials_map or {}).get(str(a.get("course_id", "")), {})
+    if isinstance(materials_dict, dict):
+        materials = _find_relevant_materials(a.get("title", ""), materials_dict)
+    else:
+        materials = materials_dict  # backward compat
+    rubric = a.get("rubric_text", "")
+    course_notes = (course_notes_map or {}).get(str(a.get("course_id", "")), "")
 
-    # Build the batch prompt
-    lines = []
-    for idx, a in enumerate(assignments):
-        due_at = a.get("due_at", "")
-        if due_at:
-            try:
-                due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-                days_until_due = (due_dt.replace(tzinfo=None) - now).days
-            except Exception:
-                days_until_due = 7
-        else:
-            days_until_due = 999
-
-        rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-        rules_summary = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
-        desc = (a.get("description") or "No description provided.")[:400]
-
-        lines.append(
-            f"--- Assignment {idx + 1} ---\n"
-            f"Course: {a.get('course_name', 'Unknown')}\n"
-            f"Title: {a.get('title', 'Unknown')}\n"
-            f"Points: {a.get('points_possible', 'unknown')}\n"
-            f"Due: {due_at} ({days_until_due} days from now)\n"
-            f"Description: {desc}\n"
-            f"Syllabus rules: {rules_summary}"
+    groups = (course_groups_map or {}).get(str(a.get("course_id", "")), [])
+    group_info = next(
+        (g for g in groups if g.get("canvas_group_id") == a.get("canvas_group_id")),
+        None
+    )
+    if group_info and group_info.get("weight", 0) > 0:
+        grade_weight_line = (
+            f"Grade category: {group_info['name']} — worth {group_info['weight']:.0f}% of final grade"
         )
+    else:
+        grade_weight_line = "Grade category: Unknown (no group weight data)"
 
+    if reduced:
+        # Groq reduced-context mode: aggressively truncate everything
+        desc_limit = 400
+        materials_limit = 0  # skip materials entirely in reduced mode
+        notes_limit = 100
+        rules_limit = 200
+    else:
+        desc_limit = 800
+        materials_limit = 1500
+        notes_limit = 400
+        rules_limit = None  # no limit for Gemini
+
+    if _is_boilerplate_description(raw_desc):
+        if materials and not reduced:
+            desc = (
+                f"[Canvas description is a submission link only. Assignment content inferred "
+                f"from course materials below:]\n{materials[:2500]}"
+            )
+        else:
+            desc = (
+                f"[No Canvas description. Infer from course '{a.get('course_name', '')}' "
+                f"and title '{a.get('title', '')}' using your academic knowledge.]"
+            )
+    else:
+        desc = raw_desc[:desc_limit]
+        if materials and materials_limit > 0:
+            desc += f"\n\nRelevant course materials:\n{materials[:materials_limit]}"
+
+    notes_text = course_notes[:notes_limit] if course_notes else "None yet"
+
+    if rules_limit is not None:
+        rules_text = json.dumps(rules)[:rules_limit] if rules else "No syllabus rules."
+    else:
+        rules_text = json.dumps(rules, indent=2) if rules else "No syllabus rules available."
+
+    rubric_text = rubric[:200] if reduced and rubric else (rubric if rubric else "Not available")
+
+    return (
+        f"--- Assignment {idx + 1} ---\n"
+        f"Course: {a.get('course_name', 'Unknown')}\n"
+        f"Title: {a.get('title', 'Unknown')}\n"
+        f"Points: {a.get('points_possible', 'unknown')}\n"
+        f"Due: {due_at} ({days_until_due} days from now)\n"
+        f"Submission types: {a.get('submission_types', 'unknown')}\n"
+        f"{grade_weight_line}\n"
+        f"Description: {desc}\n"
+        f"Rubric (grading criteria): {rubric_text}\n"
+        f"Course strategy notes: {notes_text}\n"
+        f"Syllabus rules: {rules_text}"
+    )
+
+
+def _build_batch_prompt(assignments: list, syllabus_rules_map: dict,
+                        course_materials_map: dict, course_notes_map: dict,
+                        course_groups_map: dict, now: datetime,
+                        reduced: bool = False) -> str:
+    """Assemble the full batch analysis prompt."""
+    lines = [
+        _build_assignment_line(
+            idx, a, syllabus_rules_map, course_materials_map,
+            course_notes_map, course_groups_map, now, reduced=reduced
+        )
+        for idx, a in enumerate(assignments)
+    ]
     batch_text = "\n\n".join(lines)
 
-    prompt = f"""Analyze each of the following {len(assignments)} assignments for a college student and return a JSON array.
+    return f"""You are Hermes, analyzing assignments for Niko, a college student at Ohio State University. He tends to procrastinate, but he's capable — your job is to give accurate, actionable analysis so he can get A grades.
+
+Analyze each of the following {len(assignments)} assignments and return a JSON array.
 
 {batch_text}
 
 Return a JSON array with exactly {len(assignments)} objects in the same order as the assignments above.
 Each object must have these fields:
 {{
-  "difficulty": 1-10,
-  "estimated_hours": float,
-  "assignment_type": "essay|coding|problem_set|reading|quiz|project|discussion|other",
+  "difficulty": 1-10 (honest — a 3000-word essay is 7+, a short worksheet is 2-3),
+  "estimated_hours": float (realistic wall-clock time including research, drafting, editing/debugging),
+  "time_breakdown": {{"research": float, "writing_or_coding": float, "review": float}},
+  "assignment_type": "essay|coding|problem_set|reading|quiz|project|discussion|lab|other",
   "priority": "low|medium|high|critical",
   "has_early_bonus": true/false,
   "early_bonus_details": "description or empty string",
   "can_resubmit": true/false,
   "resubmit_details": "description or empty string",
-  "recommended_days_before_due": integer,
-  "study_suggestions": ["tip1", "tip2"],
-  "watch_outs": ["important notes"],
-  "reasoning": "brief explanation"
+  "recommended_days_before_due": integer (days ahead Niko should START — be realistic, not alarmist),
+  "study_suggestions": ["3-5 specific, actionable strategies for THIS assignment type"],
+  "watch_outs": ["2-4 specific traps or failure modes for this assignment"],
+  "course_strategy_note": "one sentence on how this fits into the course grade",
+  "task_sections": ["specific subtask 1 (est time)", "subtask 2 (est time)"],
+  "course_weight_context": "one sentence: what % of final grade this is worth and whether it's high/low stakes relative to the course",
+  "study_strategy": "3-5 sentence specific action plan: what to review first, which course materials or lecture topics to focus on, how to approach the problem type, and the single most common mistake to avoid on this specific assignment type",
+  "reasoning": "2-3 calm, factual sentences explaining difficulty and time estimate"
 }}
 
-Consider: student procrastinates and currently does things day-of. Be realistic about difficulty.
+TONE RULES — strictly enforced:
+- reasoning must be factual and calm. Never use ALL CAPS, never say "drop everything", never be melodramatic.
+- Match urgency to actual timeline: 3+ days and < 3h of work = low urgency, matter-of-fact tone.
+- "critical" priority is reserved for things due within 24h OR exams/finals. Use "high" for due-in-3-days.
+- If description says "[No real description]", infer from course name + title using your academic knowledge.
+- study_suggestions must be SPECIFIC to this assignment type, not generic ("read the rubric" is not useful).
+- watch_outs must be things that commonly cause point deductions on THIS specific type of work.
+- task_sections: list 3-5 concrete sub-tasks with estimated time each ONLY if there's enough info from description/PDF to be specific; otherwise use an empty array [].
+- course_weight_context: one sentence stating the grade % impact and whether it's high or low stakes.
+
+PRIORITY & DIFFICULTY CALIBRATION — hard rules, no exceptions:
+- difficulty 8/10 → priority must be "high" (never "medium")
+- difficulty 9-10/10 → priority must be "critical"
+- estimated_hours ≥ 7h → priority must be at least "high"
+- estimated_hours ≥ 10h → priority must be "critical"
+- "medium" is for difficulty 5-7, estimated_hours 2-6h ONLY
+- "low" is only for trivial tasks: difficulty 1-4, < 2h of real work
+- A coding project worth 100+ points is NEVER "medium" or below
+- recommended_days_before_due must be at least ceil(estimated_hours / 3) — don't tell Niko to do 10h of work in one sitting
+
 Return ONLY a valid JSON array, no markdown, no extra text."""
 
-    try:
-        raw = _ask(prompt)
 
-        # _parse_json handles a single object; for an array we do it manually
+def analyze_assignments_batch(assignments: list, syllabus_rules_map: dict,
+                               course_materials_map: dict = None,
+                               course_notes_map: dict = None,
+                               course_groups_map: dict = None) -> list:
+    """Analyze a list of assignments in a single API call (Gemini primary, Groq fallback).
+
+    Gemini can handle large batches (up to ~15); Groq is limited to GROQ_BATCH_SIZE (8)
+    assignments per call to stay within its ~6k-token per-request window.
+
+    When Gemini falls back to Groq and Groq returns HTTP 413 (payload too large), the
+    function automatically retries with reduced-context versions of the assignment text
+    rather than treating the error as a rate limit.
+
+    Returns a list of analysis dicts in the same order as the input assignments.
+    """
+    if not assignments:
+        return []
+
+    now = datetime.now()
+
+    def _parse_batch_result(raw, count):
         text = raw.strip()
         if text.startswith("```"):
             parts = text.split("```")
@@ -230,16 +573,16 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
             if text.startswith("json"):
                 text = text[4:]
         text = text.strip()
-
         results = json.loads(text)
         if not isinstance(results, list):
             raise ValueError("Response was not a JSON array")
-        if len(results) != len(assignments):
-            raise ValueError(f"Expected {len(assignments)} results, got {len(results)}")
+        if len(results) != count:
+            raise ValueError(f"Expected {count} results, got {len(results)}")
+        return results
 
-        # Calculate start_by for each result
+    def _apply_start_by(results, batch_assignments):
         for i, analysis in enumerate(results):
-            due_at = assignments[i].get("due_at", "")
+            due_at = batch_assignments[i].get("due_at", "")
             if due_at and analysis.get("recommended_days_before_due") is not None:
                 try:
                     due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00")).replace(tzinfo=None)
@@ -248,21 +591,277 @@ Return ONLY a valid JSON array, no markdown, no extra text."""
                     if start_dt.hour < Config.WAKE_HOUR:
                         start_dt = start_dt.replace(hour=Config.WAKE_HOUR, minute=0)
                     analysis["start_by"] = start_dt.isoformat()
-                except Exception as e:
-                    logger.warning(f"Could not calculate start_by for batch item {i}: {e}")
+                except Exception:
                     analysis["start_by"] = None
             else:
                 analysis["start_by"] = None
-
         return results
 
-    except Exception as e:
-        logger.error(f"Batch analysis failed ({e}), falling back to individual analysis")
+    def _enforce_calibration(results):
+        """Hard post-processing rules — Python enforces what the AI prompt says."""
+        import math
+        for a in results:
+            diff = a.get("difficulty") or 0
+            hrs = a.get("estimated_hours") or 0
+            p = a.get("priority", "medium")
+            if hrs >= 10:
+                a["priority"] = "critical"
+                if a.get("recommended_days_before_due") is not None:
+                    a["recommended_days_before_due"] = max(a["recommended_days_before_due"], math.ceil(hrs / 3))
+            elif hrs >= 7 or diff >= 9:
+                if p not in ("critical",):
+                    a["priority"] = "high"
+            elif diff >= 8:
+                if p == "medium" or p == "low":
+                    a["priority"] = "high"
+        return results
+
+    def _run_batch(batch: list, reduced: bool = False) -> list:
+        """Run analysis for a single sub-batch. Returns list of analysis dicts.
+
+        reduced=True uses truncated context (Groq 413 recovery mode).
+        """
+        prompt = _build_batch_prompt(
+            batch, syllabus_rules_map, course_materials_map,
+            course_notes_map, course_groups_map, now, reduced=reduced
+        )
+
+        for attempt in range(2):
+            try:
+                raw = _ask(prompt)
+                results = _parse_batch_result(raw, len(batch))
+                return _enforce_calibration(_apply_start_by(results, batch))
+
+            except PayloadTooLargeError:
+                # Groq rejected the payload. If we already have reduced context, nothing
+                # more we can do — return defaults for this sub-batch.
+                if reduced:
+                    logger.warning(
+                        f"Groq 413 even with reduced context ({len(batch)} assignments) "
+                        f"— returning defaults."
+                    )
+                    return [_default_analysis() for _ in batch]
+                # First encounter: retry with aggressively truncated context.
+                logger.warning(
+                    f"Groq 413 — retrying batch ({len(batch)} assignments) with reduced context"
+                )
+                return _run_batch(batch, reduced=True)
+
+            except ClientError as e:
+                if e.code == 429:
+                    if attempt == 0:
+                        logger.warning("Batch rate-limited (Gemini 429) — waiting 20s before retry...")
+                        time.sleep(20)
+                        continue
+                    logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(batch)} assignments.")
+                    return [_default_analysis() for _ in batch]
+                logger.error(f"Batch API error ({e}), falling back to individual analysis")
+                break  # non-429 → fall through to per-item fallback
+
+            except Exception as e:
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    if attempt == 0:
+                        logger.warning("Batch rate-limited (provider 429) — waiting 20s before retry...")
+                        time.sleep(20)
+                        continue
+                    logger.warning(f"Batch still rate-limited after retry — returning defaults for {len(batch)} assignments.")
+                    return [_default_analysis() for _ in batch]
+                logger.error(f"Batch parse/logic error ({e}), falling back to individual analysis")
+                break
+
+        # Parse/logic failure — try individual analysis as last resort
         fallback = []
-        for a in assignments:
+        for a in batch:
             rules = syllabus_rules_map.get(str(a.get("course_id", "")), {})
-            fallback.append(analyze_assignment(a, rules, a.get("course_name", "")))
-        return fallback
+            result = analyze_assignment(a, rules, a.get("course_name", ""))
+            if result.get("_rate_limited"):
+                logger.warning("Individual fallback also rate-limited — stopping fallback loop.")
+                fallback.extend([_default_analysis() for _ in batch[len(fallback):]])
+                break
+            fallback.append(result)
+        return _enforce_calibration(fallback)
+
+    # Split large batches into Groq-safe sub-batches and process each.
+    # We use GROQ_BATCH_SIZE as the cap even for Gemini to keep prompts manageable;
+    # Gemini can handle larger batches but smaller chunks reduce blast radius if one fails.
+    all_results = []
+    for start in range(0, len(assignments), GROQ_BATCH_SIZE):
+        chunk = assignments[start:start + GROQ_BATCH_SIZE]
+        all_results.extend(_run_batch(chunk))
+    return all_results
+
+
+def generate_grade_targets(courses_data: list) -> list:
+    """Batch-generate realistic target grade suggestions for multiple courses.
+
+    courses_data: list of dicts with keys: name, current_grade, remaining_count,
+                  remaining_hours, course_notes, grading_weights
+
+    Returns list of dicts: {course_name, suggested_target, reasoning}
+    """
+    if not courses_data:
+        return []
+
+    lines = []
+    for i, c in enumerate(courses_data):
+        lines.append(
+            f"Course {i+1}: {c.get('name', 'Unknown')}\n"
+            f"  Current grade: {c.get('current_grade', 'unknown')}\n"
+            f"  Remaining assignments: {c.get('remaining_count', '?')} (~{c.get('remaining_hours', '?')}h of work)\n"
+            f"  Grading weights: {c.get('grading_weights', 'unknown')}\n"
+            f"  Course notes: {(c.get('course_notes') or 'None')[:200]}"
+        )
+
+    prompt = f"""Niko is a college student at Ohio State. Suggest a realistic but ambitious target grade for each course.
+
+{chr(10).join(lines)}
+
+For each course, suggest a target percentage that is:
+- Realistic given the current grade and remaining work
+- Ambitious but achievable with solid effort (not guaranteed, requires actual work)
+- Higher if the current grade is already strong and remaining work is manageable
+- Lower if the current grade is struggling or remaining work is very heavy
+- Never above 100%, never below current grade (can't go back in time)
+
+Return a JSON array with exactly {len(courses_data)} objects:
+[{{"course_name": "...", "suggested_target": 92.5, "reasoning": "One sentence explaining why this target makes sense."}}]
+
+Return ONLY valid JSON, no markdown."""
+
+    try:
+        raw = _ask(prompt)
+        text = raw.strip()
+        if text.startswith("```"):
+            parts = text.split("```")
+            text = parts[1] if len(parts) > 1 else text
+            if text.startswith("json"):
+                text = text[4:]
+        results = json.loads(text.strip())
+        if isinstance(results, list) and len(results) == len(courses_data):
+            return results
+    except Exception as e:
+        logger.error(f"generate_grade_targets failed: {e}")
+    return []
+
+
+def analyze_course_strategy(course_name: str, syllabus_text: str, current_grade: float = None) -> dict:
+    grade_note = f"Current grade: {current_grade:.1f}%" if current_grade is not None else "No grades entered yet."
+
+    prompt = f"""Analyze this course and give a strategic plan to maximize the student's grade.
+
+Course: {course_name}
+{grade_note}
+
+Syllabus content:
+{syllabus_text[:4000]}
+
+Return JSON:
+{{
+  "grade_breakdown": {{"category": "weight_pct", ...}},
+  "highest_impact_categories": ["which categories most affect the final grade"],
+  "strategy": "2-3 sentence overall strategy to maximize grade",
+  "assignments_to_prioritize": "which types of assignments to focus on and why",
+  "assignments_to_not_sweat": "which assignments are low-stakes",
+  "gpa_advice": "specific advice given current grade trajectory",
+  "key_rules": ["important rules from the syllabus that affect strategy"]
+}}
+
+Return ONLY valid JSON, no markdown."""
+
+    try:
+        return _parse_json(_ask(prompt))
+    except Exception as e:
+        logger.error(f"Course strategy analysis failed for {course_name}: {e}")
+        return {"strategy": "Analysis unavailable.", "grade_breakdown": {}, "key_rules": []}
+
+
+def generate_study_plan(assignments: list, exams: list, wake_hour: int = 12, stop_hour: int = 22, days: int = 14) -> list:
+    """Generate a day-by-day study schedule for the next N days."""
+    from datetime import date, timedelta
+
+    if not assignments and not exams:
+        return []
+
+    now = datetime.now()
+    available_hours_per_day = stop_hour - wake_hour
+
+    work_items = []
+    for a in assignments:
+        if not a.get("due_at"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(a["due_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            days_left = max((due_dt - now).days, 0.5)
+            hours_needed = float(a.get("estimated_hours") or 2.0)
+            difficulty = int(a.get("difficulty") or 5)
+            urgency = hours_needed / days_left * (difficulty / 5.0)
+            work_items.append({
+                "assignment_id": a["id"],
+                "title": a.get("title", ""),
+                "course_name": a.get("course_name", ""),
+                "due_dt": due_dt,
+                "hours_needed": hours_needed,
+                "urgency": urgency,
+                "days_left": days_left,
+            })
+        except Exception:
+            continue
+
+    for e in exams:
+        if not e.get("start_at"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(e["start_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            days_left = max((due_dt - now).days, 0.5)
+            hours_needed = float(e.get("study_hours_estimated") or 6.0)
+            urgency = hours_needed / days_left * 2.0
+            work_items.append({
+                "assignment_id": e["id"],
+                "title": f"STUDY: {e.get('title', 'Exam')}",
+                "course_name": e.get("course_name", ""),
+                "due_dt": due_dt,
+                "hours_needed": hours_needed,
+                "urgency": urgency,
+                "days_left": days_left,
+            })
+        except Exception:
+            continue
+
+    if not work_items:
+        return []
+
+    work_items.sort(key=lambda x: -x["urgency"])
+
+    plan_entries = []
+    daily_budget = {}
+
+    for item in work_items:
+        hours_left = item["hours_needed"]
+        due_date = item["due_dt"].date()
+
+        for day_offset in range(days):
+            plan_date = (now + timedelta(days=day_offset)).date()
+            if plan_date >= due_date:
+                break
+            if hours_left <= 0:
+                break
+
+            date_str = plan_date.isoformat()
+            used = daily_budget.get(date_str, 0)
+            max_hours = min(available_hours_per_day * 0.6, 6.0)
+            slot = min(hours_left, max_hours - used, 3.0)
+
+            if slot > 0.25:
+                plan_entries.append({
+                    "date": date_str,
+                    "assignment_id": item["assignment_id"],
+                    "hours_planned": round(slot, 1),
+                    "note": f"{item['title']} ({item['course_name']}) — due {item['due_dt'].strftime('%b %-d')}"
+                })
+                daily_budget[date_str] = used + slot
+                hours_left -= slot
+
+    return plan_entries
 
 
 def analyze_exam(exam: dict, syllabus_rules: dict, course_name: str) -> dict:
@@ -293,9 +892,15 @@ Return:
   "days_to_start_studying": integer,
   "daily_study_hours": float,
   "priority": "medium|high|critical",
-  "study_tips": ["tip1", "tip2"],
+  "study_tips": ["tip1", "tip2", "tip3"],
+  "daily_study_plan": [
+    {{"day": 1, "focus": "Review [specific topic], skim lecture notes on [topic]", "hours": 1.5}},
+    {{"day": 2, "focus": "Practice problems from [specific topic], review weak areas", "hours": 2.0}}
+  ],
   "reasoning": "brief explanation"
 }}
+
+For daily_study_plan: generate one entry per study day (up to days_to_start_studying days). Each focus should be specific to this course/exam — reference actual topics if known from the description or course. If description gives no topics, reference general exam prep strategies for the subject.
 
 Return ONLY valid JSON, no markdown."""
 
@@ -366,14 +971,14 @@ Return ONLY valid JSON, no markdown."""
 
 
 def generate_chat_response(user_message: str, context: dict) -> str:
-    """Respond conversationally to the student via the web dashboard."""
+    """Respond conversationally. Uses Groq (fast) with Gemini fallback."""
     assignments_summary = []
-    for a in context.get("assignments", [])[:10]:
+    for a in context.get("assignments", [])[:12]:
         due = a.get("due_at", "")[:10] if a.get("due_at") else "no due date"
         assignments_summary.append(
-            f"- {a.get('title')} ({a.get('course_name','')}) due {due}, "
-            f"status: {a.get('status','pending')}, priority: {a.get('priority','?')}, "
-            f"difficulty: {a.get('difficulty','?')}/10, ~{a.get('estimated_hours','?')}h"
+            f"- {a.get('title')} ({a.get('course_name','')}) due {due} | "
+            f"status:{a.get('status','pending')} priority:{a.get('priority','?')} "
+            f"diff:{a.get('difficulty','?')}/10 ~{a.get('estimated_hours','?')}h"
         )
 
     exams_summary = []
@@ -381,29 +986,113 @@ def generate_chat_response(user_message: str, context: dict) -> str:
         date = e.get("start_at", "")[:10] if e.get("start_at") else "unknown"
         exams_summary.append(f"- {e.get('title')} ({e.get('course_name','')}) on {date}")
 
-    prompt = f"""You are Hermes, an AI school buddy for a college student at Ohio State University named Niko.
-You know everything about his upcoming assignments and exams. Be supportive, direct, and fight for his success.
-Be warm but no-nonsense. Today is {context.get('current_date', datetime.now().strftime('%Y-%m-%d'))}.
+    grades_summary = []
+    for g in context.get("grades", [])[:8]:
+        if g.get("grade_pct") is not None:
+            grades_summary.append(f"- {g.get('title','?')} ({g.get('course_name','?')}): {g['grade_pct']:.1f}%")
 
-Upcoming assignments:
-{chr(10).join(assignments_summary) if assignments_summary else 'None upcoming.'}
+    course_grades_summary = []
+    for c in context.get("course_grades", []):
+        if c.get("canvas_grade_pct") is not None:
+            course_grades_summary.append(f"- {c['name']}: {c['canvas_grade_pct']:.1f}% overall")
 
-Upcoming exams:
-{chr(10).join(exams_summary) if exams_summary else 'None upcoming.'}
+    syllabus_summary = context.get("syllabus_notes", "")
 
-{('Note: ' + context.get('status_update_note','')) if context.get('status_update_note') else ''}
+    course_notes_list = []
+    for c in context.get("course_grades", []):
+        notes = db.get_course_notes(str(c.get("id", c.get("canvas_id", ""))))
+        if notes:
+            course_notes_list.append(f"[{c['name']}] {notes[:300]}")
+    course_notes_block = ("Course strategy notes:\n" + "\n".join(course_notes_list)) if course_notes_list else ""
 
-Niko says: {user_message}
+    # Build focused assignment block if this is an assignment-specific chat
+    focused_block = ""
+    fa = context.get("focused_assignment")
+    if fa:
+        fa_analysis = fa.get("analysis") or {}
+        focused_block = f"""
+FOCUSED ASSIGNMENT CONTEXT:
+Title: {fa.get('title')}
+Course: {fa.get('course_name')}
+Due: {fa.get('due_at', '')[:10]}
+Points: {fa.get('points_possible')}
+Description: {(fa.get('description') or 'None')[:500]}
+Hermes analysis: difficulty={fa_analysis.get('difficulty')}/10, estimated_hours={fa_analysis.get('estimated_hours')}, priority={fa_analysis.get('priority')}
+Reasoning: {fa_analysis.get('reasoning', '')}
+Study tips: {'; '.join((fa_analysis.get('study_suggestions') or [])[:3])}
+Watch-outs: {'; '.join((fa_analysis.get('watch_outs') or [])[:3])}
+Course materials: {fa.get('course_content', '')[:600]}
 
-Respond helpfully and directly. If he tells you he finished or started something, acknowledge it positively.
-If he's asking about an assignment, give genuinely useful academic guidance.
-If he seems stressed, be encouraging. If he's too relaxed about something urgent, be honest."""
+Niko is asking specifically about this assignment. Answer directly and specifically — not generic advice.
+"""
+
+    prompt = f"""Today: {context.get('current_date', datetime.now().strftime('%Y-%m-%d %A'))}
+{focused_block}
+Assignments:
+{chr(10).join(assignments_summary) if assignments_summary else 'None.'}
+
+Exams:
+{chr(10).join(exams_summary) if exams_summary else 'None.'}
+
+Course grades (from Canvas):
+{chr(10).join(course_grades_summary) if course_grades_summary else 'Not available.'}
+
+Recent graded assignments:
+{chr(10).join(grades_summary) if grades_summary else 'None entered.'}
+
+{('Syllabus notes: ' + syllabus_summary) if syllabus_summary else ''}
+{course_notes_block}
+{('Context: ' + context.get('status_update_note','')) if context.get('status_update_note') else ''}
+
+Niko: {user_message}"""
+
+    try:
+        # Groq is primary for chat — faster, more conversational.
+        # call_type="chat" ensures chat calls are tracked separately from analysis
+        # calls, so the Alerts page can show a meaningful breakdown.
+        if Config.GROQ_API_KEY:
+            return _ask_groq(prompt, model=Config.GROQ_MODEL_CHAT,
+                             system_prompt=HERMES_CHAT_PERSONA, call_type="chat")
+        return _ask(prompt, call_type="chat")
+    except Exception as e:
+        logger.error(f"Chat response failed: {e}")
+        return "Hit an error — try again in a moment."
+
+
+def generate_week_synthesis(upcoming_assignments: list, upcoming_exams: list) -> str:
+    """Generate a 2-3 sentence week overview. Stored and shown at top of calendar."""
+    if not upcoming_assignments and not upcoming_exams:
+        return ""
+
+    now = datetime.now()
+
+    # Build a compact summary of what's coming up
+    lines = []
+    for a in upcoming_assignments[:15]:
+        due = a.get("due_at", "")[:10] if a.get("due_at") else "?"
+        lines.append(f"- {a.get('title')} ({a.get('course_name','')}) due {due} | {a.get('priority','?')} priority | ~{a.get('estimated_hours','?')}h")
+
+    for e in upcoming_exams[:5]:
+        date = e.get("start_at", "")[:10] if e.get("start_at") else "?"
+        lines.append(f"- EXAM: {e.get('title')} ({e.get('course_name','')}) on {date}")
+
+    prompt = f"""Today is {now.strftime('%A %B %d, %Y')}.
+
+Here's what Niko has coming up in the next 2 weeks:
+{chr(10).join(lines)}
+
+Write 2-3 sentences MAX summarizing:
+1. The roughest upcoming period (if any cluster of heavy work exists)
+2. The single most important thing to start NOW (if anything is urgent or high-effort)
+3. Any clear day(s) to use wisely
+
+Keep it direct, specific, and actionable. No preamble like "Looking at your schedule..." — just the insight. If there's nothing pressing, say so briefly."""
 
     try:
         return _ask(prompt)
     except Exception as e:
-        logger.error(f"Chat response failed: {e}")
-        return "Hit an error — try again in a moment."
+        logger.error(f"generate_week_synthesis failed: {e}")
+        return ""
 
 
 def generate_weekly_digest(assignments: list, exams: list, collision_report: dict) -> str:

@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %} — Announcements{% endblock %}
+
+{% block head %}
+<style>
+  .ann-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 12px;
+    transition: border-color 0.15s;
+  }
+  .ann-card:hover { border-color: var(--accent-dim); }
+  .ann-card.highlighted {
+    border-left: 3px solid var(--yellow);
+  }
+  .ann-card.unread {
+    border-left: 3px solid var(--accent);
+  }
+  .ann-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+  .ann-title {
+    font-weight: 600;
+    font-size: 15px;
+    line-height: 1.4;
+  }
+  .ann-meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 10px;
+    display: flex;
+    gap: 12px;
+  }
+  .ann-message {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.6;
+    max-height: 120px;
+    overflow: hidden;
+    position: relative;
+  }
+  .ann-message.expanded {
+    max-height: none;
+  }
+  .ann-message p { margin-bottom: 8px; }
+  .ann-message a { color: var(--accent); }
+  .ann-read-more {
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 12px;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    margin-top: 4px;
+  }
+  .keyword-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    background: rgba(251,191,36,0.15);
+    color: var(--yellow);
+    margin-left: 8px;
+  }
+  .empty-ann {
+    text-align: center;
+    padding: 60px;
+    color: var(--muted);
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
+  <h1>Announcements</h1>
+</div>
+<p class="subtitle">Course announcements from Canvas</p>
+
+{% if not announcements %}
+<div class="empty-ann">
+  <div style="font-size:18px; margin-bottom:8px;">No announcements yet.</div>
+  <div style="font-size:13px;">Sync Canvas to pull in course announcements.</div>
+</div>
+{% else %}
+
+{% for ann in announcements %}
+<div class="ann-card {% if ann.highlighted %}highlighted{% elif not ann.is_read %}unread{% endif %}">
+  <div class="ann-header">
+    <div class="ann-title">
+      {{ ann.title }}
+      {% if ann.highlighted %}<span class="keyword-tag">Important</span>{% endif %}
+    </div>
+  </div>
+  <div class="ann-meta">
+    <span>{{ ann.course_name or 'Unknown Course' }}</span>
+    <span>{{ ann.posted_fmt }}</span>
+    {% if not ann.is_read %}<span style="color:var(--accent);">• New</span>{% endif %}
+  </div>
+  {% if ann.message %}
+  <div class="ann-message" id="ann-msg-{{ loop.index }}">
+    {% if '<' in ann.message and '>' in ann.message %}
+      {{ ann.message | safe }}
+    {% else %}
+      <p>{{ ann.message[:500] }}{% if ann.message|length > 500 %}…{% endif %}</p>
+    {% endif %}
+  </div>
+  {% if ann.message|length > 300 %}
+  <button class="ann-read-more" onclick="toggleExpand({{ loop.index }}, this)">Read more</button>
+  {% endif %}
+  {% endif %}
+</div>
+{% endfor %}
+
+{% endif %}
+
+<script>
+function toggleExpand(idx, btn) {
+  const el = document.getElementById('ann-msg-' + idx);
+  if (el.classList.contains('expanded')) {
+    el.classList.remove('expanded');
+    btn.textContent = 'Read more';
+  } else {
+    el.classList.add('expanded');
+    btn.textContent = 'Show less';
+  }
+}
+</script>
+{% endblock %}

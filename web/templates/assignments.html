@@ -1,34 +1,217 @@
 {% extends "base.html" %}
 {% block title %} — Assignments{% endblock %}
 
-{% block content %}
-<h1>Assignments</h1>
-<p class="subtitle">{{ total }} upcoming &nbsp;·&nbsp; sorted by due date</p>
+{% block head %}
+<style>
+  .filter-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .filter-input {
+    flex: 1;
+    min-width: 200px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+  .filter-input:focus { outline: none; border-color: var(--accent); }
+  .filter-select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .filter-select:focus { outline: none; border-color: var(--accent); }
+  .filter-stats {
+    font-size: 12px;
+    color: var(--muted);
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .bulk-bar {
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 12px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+  }
+  .completion-bar {
+    height: 3px;
+    background: var(--surface2);
+    border-radius: 2px;
+    margin-top: 4px;
+    width: 60px;
+    display: inline-block;
+    vertical-align: middle;
+  }
+  .completion-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .row-check {
+    accent-color: var(--accent);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endblock %}
 
-{% if not assignments %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
+  <h1>Assignments</h1>
+</div>
+<p class="subtitle" id="filterStats">{{ total }} todo &nbsp;·&nbsp; ~{{ total_hours }}h total</p>
+
+{% if unanalyzed_count > 0 %}
+<div id="analyzingBanner" style="background:rgba(124,108,255,0.1); border:1px solid rgba(124,108,255,0.3); border-radius:8px; padding:10px 16px; margin-bottom:12px; font-size:13px; color:var(--accent); display:flex; align-items:center; gap:8px;">
+  <span style="display:inline-block; width:10px; height:10px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+  Hermes is analyzing {{ unanalyzed_count }} assignment{{ 's' if unanalyzed_count != 1 else '' }} — page will refresh when done
+</div>
+<script>
+// Auto-refresh every 20s while analysis is in progress
+setTimeout(function() {
+  fetch('/api/sync-status').then(r => r.json()).then(data => {
+    if ((data.unanalyzed_count || 0) > 0 || data.status === 'running') {
+      location.reload();
+    }
+  }).catch(() => {});
+}, 20000);
+</script>
+{% endif %}
+
+{% if overdue %}
+<div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.35); border-radius:8px; padding:10px 16px; margin-bottom:14px; font-size:13px; color:var(--red); font-weight:600;">
+  {{ overdue|length }} overdue assignment{{ 's' if overdue|length != 1 }}: {{ overdue|map(attribute='title')|list|join(', ')|truncate(120) }}
+</div>
+{% endif %}
+
+<!-- Course completion stats -->
+{% if course_completion %}
+<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+  {% for cname, stats in course_completion.items() %}
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:11px;">
+    <span style="color:var(--muted);">{{ cname.split(' ')[-1] }}:</span>
+    <span style="font-weight:600; color:{% if stats.pct >= 80 %}var(--green){% elif stats.pct >= 50 %}var(--yellow){% else %}var(--red){% endif %};">
+      {{ stats.submitted }}/{{ stats.total }}
+    </span>
+    <span style="color:var(--muted);">({{ stats.pct }}%)</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Filter bar -->
+<div class="filter-bar">
+  <input class="filter-input" type="text" id="searchInput" placeholder="Search assignments..."
+         oninput="applyFilters()" />
+  <select class="filter-select" id="courseFilter" onchange="applyFilters()">
+    <option value="">All Courses</option>
+    {% for cn in course_names %}
+    <option value="{{ cn }}">{{ cn }}</option>
+    {% endfor %}
+  </select>
+  <select class="filter-select" id="priorityFilter" onchange="applyFilters()">
+    <option value="">All Priorities</option>
+    <option value="critical">Critical</option>
+    <option value="high">High</option>
+    <option value="medium">Medium</option>
+    <option value="low">Low</option>
+  </select>
+  <select class="filter-select" id="completionFilter" onchange="applyFilters()">
+    <option value="todo">Todo</option>
+    <option value="done">Done</option>
+    <option value="">All</option>
+  </select>
+  <select class="filter-select" id="sortSelect" onchange="applyFilters()">
+    <option value="due">Sort: Due Date</option>
+    <option value="difficulty">Sort: Difficulty</option>
+    <option value="hours">Sort: Est. Hours</option>
+    <option value="priority">Sort: Priority</option>
+    <option value="impact">Sort: Grade Impact</option>
+  </select>
+  <select class="filter-select" id="impactFilter" onchange="applyFilters()">
+    <option value="">All Impact Tiers</option>
+    <option value="high">High Impact (&gt;2%)</option>
+    <option value="medium">Medium Impact (1-2%)</option>
+    <option value="low">Low Impact (&lt;1%)</option>
+  </select>
+  <div class="filter-stats" id="filterCount"></div>
+</div>
+
+<!-- Bulk action bar -->
+<div class="bulk-bar" id="bulkBar">
+  <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" />
+  <span id="selectedCount">0 selected</span>
+  <button class="btn btn-ghost" style="font-size:12px; color:var(--green); border-color:var(--green);"
+          onclick="bulkMarkDone()">Mark Done</button>
+  <button class="btn btn-ghost" style="font-size:12px;" onclick="clearSelection()">Clear</button>
+</div>
+
+{% if not all_assignments %}
 <div class="card" style="text-align:center; padding:48px; color:var(--muted);">
-  No upcoming assignments found. Hermes will sync from Canvas automatically.
+  No assignments found. Hermes will sync from Canvas automatically.
 </div>
 {% else %}
-<div class="card" style="padding:0; overflow:hidden;">
+<div class="card" style="padding:0; overflow:hidden;" id="assignmentsTable">
   <table>
     <thead>
       <tr>
+        <th style="width:24px;"><input type="checkbox" id="headerCheck" class="row-check" onchange="toggleSelectAll(this)" /></th>
         <th>Assignment</th>
         <th>Course</th>
         <th>Due</th>
         <th>Priority</th>
         <th>Difficulty</th>
         <th>Est. Time</th>
+        <th>Grade Impact</th>
         <th>Start By</th>
+        <th style="white-space:nowrap;">Progress</th>
         <th>Flags</th>
+        <th></th>
       </tr>
     </thead>
-    <tbody>
-      {% for a in assignments %}
-      <tr>
+    <tbody id="assignmentsBody">
+      {% for a in all_assignments %}
+      {% set is_done = a.status in ('submitted', 'complete') %}
+      {% set is_overdue = a.due_class == 'due-soon' and a.due_fmt and a.due_fmt.startswith('Overdue') %}
+      <tr id="arow-{{ a.id }}"
+          data-title="{{ a.title | lower }}"
+          data-course="{{ a.course_name | lower }}"
+          data-priority="{{ a.priority }}"
+          data-status="{{ a.status }}"
+          data-done="{{ 'done' if is_done else 'todo' }}"
+          data-difficulty="{{ a.difficulty or 0 }}"
+          data-hours="{{ a.estimated_hours or 0 }}"
+          data-due="{{ a.due_at or '' }}"
+          data-impact="{{ a.grade_impact_pct or 0 }}"
+          data-impact-tier="{{ a.impact_tier or 'unknown' }}"
+          style="{% if is_done %}opacity:0.55;{% elif is_overdue %}border-left:3px solid var(--red);{% endif %}">
         <td>
-          <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ a.title }}</a>
+          <input type="checkbox" class="row-check assignment-check" value="{{ a.id }}"
+                 onchange="onRowCheck()" />
+        </td>
+        <td>
+          <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; {% if is_done %}text-decoration:line-through; color:var(--muted);{% endif %}">{{ a.title }}</a>
+          {% if is_done %}<span style="font-size:10px; color:var(--green); margin-left:6px;">submitted</span>{% endif %}
         </td>
         <td style="color:var(--muted);">{{ a.course_name }}</td>
         <td class="{{ a.due_class }}">{{ a.due_fmt }}</td>
@@ -43,11 +226,37 @@
           {% else %}—{% endif %}
         </td>
         <td style="color:var(--muted);">{% if a.estimated_hours %}~{{ a.estimated_hours }}h{% else %}—{% endif %}</td>
+        <td style="font-size:12px; white-space:nowrap;">
+          {% if a.grade_impact_pct is not none %}
+            <span style="font-weight:600; color:{% if a.impact_tier == 'high' %}var(--red){% elif a.impact_tier == 'medium' %}var(--yellow){% else %}var(--muted){% endif %};"
+                  title="{{ a.impact_tier | title }} impact — {{ a.grade_impact_pct }}% of final grade">
+              {{ a.grade_impact_pct }}%
+            </span>
+          {% else %}—{% endif %}
+        </td>
         <td style="color:var(--accent); font-size:12px;">{{ a.start_by_fmt or '—' }}</td>
+        <td>
+          {% if a.checklist_stats is defined and a.checklist_stats.total > 0 %}
+          <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted);">
+            {{ a.checklist_stats.done }}/{{ a.checklist_stats.total }}
+            <div class="completion-bar">
+              <div class="completion-fill" style="width:{{ a.checklist_stats.pct }}%;"></div>
+            </div>
+          </div>
+          {% else %}—{% endif %}
+        </td>
         <td>
           {% if a.has_early_bonus %}<span class="tag tag-bonus">bonus</span>{% endif %}
           {% if a.can_resubmit %}<span class="tag tag-bonus">resub</span>{% endif %}
-          {% if not a.difficulty %}<span class="tag">analyzing...</span>{% endif %}
+          {% if not a.difficulty and not is_done %}<span class="tag">analyzing...</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          {% if a.html_url and not is_done %}
+          <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="font-size:11px; padding:3px 8px; color:var(--accent); border-color:var(--accent); margin-right:4px;">Submit →</a>
+          {% endif %}
+          <button class="btn btn-ghost" id="done-{{ a.id }}"
+                  style="font-size:11px; padding:3px 8px; {% if is_done %}color:var(--muted); border-color:var(--border);{% else %}color:var(--green); border-color:var(--green);{% endif %}"
+                  onclick="toggleDoneRow('{{ a.id }}', this, {{ 'true' if is_done else 'false' }})">{{ 'Undo' if is_done else 'Done' }}</button>
         </td>
       </tr>
       {% endfor %}
@@ -55,4 +264,120 @@
   </table>
 </div>
 {% endif %}
+
+<script>
+const priorityOrder = {critical: 0, high: 1, medium: 2, low: 3};
+
+// Default to 'todo' filter on load
+document.addEventListener('DOMContentLoaded', () => applyFilters());
+
+function applyFilters() {
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const course = document.getElementById('courseFilter').value.toLowerCase();
+  const priority = document.getElementById('priorityFilter').value;
+  const completion = document.getElementById('completionFilter').value; // 'todo', 'done', or ''
+  const sortBy = document.getElementById('sortSelect').value;
+  const impactFilter = document.getElementById('impactFilter').value;
+
+  const tbody = document.getElementById('assignmentsBody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+
+  let visible = [];
+  rows.forEach(row => {
+    const title = row.dataset.title || '';
+    const rowCourse = row.dataset.course || '';
+    const rowPriority = row.dataset.priority || '';
+    const rowDone = row.dataset.done || 'todo';
+    const rowImpactTier = row.dataset.impactTier || '';
+
+    const matchSearch = !search || title.includes(search) || rowCourse.includes(search);
+    const matchCourse = !course || rowCourse.includes(course);
+    const matchPriority = !priority || rowPriority === priority;
+    const matchCompletion = !completion || rowDone === completion;
+    const matchImpact = !impactFilter || rowImpactTier === impactFilter;
+
+    if (matchSearch && matchCourse && matchPriority && matchCompletion && matchImpact) {
+      row.style.display = '';
+      visible.push(row);
+    } else {
+      row.style.display = 'none';
+    }
+  });
+
+  // Sort visible rows
+  visible.sort((a, b) => {
+    if (sortBy === 'due') {
+      return (a.dataset.due || '').localeCompare(b.dataset.due || '');
+    } else if (sortBy === 'difficulty') {
+      return parseInt(b.dataset.difficulty) - parseInt(a.dataset.difficulty);
+    } else if (sortBy === 'hours') {
+      return parseFloat(b.dataset.hours) - parseFloat(a.dataset.hours);
+    } else if (sortBy === 'priority') {
+      return (priorityOrder[a.dataset.priority] || 2) - (priorityOrder[b.dataset.priority] || 2);
+    } else if (sortBy === 'impact') {
+      return parseFloat(b.dataset.impact || 0) - parseFloat(a.dataset.impact || 0);
+    }
+    return 0;
+  });
+
+  visible.forEach(row => tbody.appendChild(row));
+
+  // Update stats
+  let totalHours = 0;
+  visible.forEach(r => { if (r.dataset.done !== 'done') totalHours += parseFloat(r.dataset.hours) || 0; });
+  document.getElementById('filterCount').textContent =
+    `${visible.length} shown · ~${totalHours.toFixed(1)}h`;
+}
+
+// Bulk selection
+function onRowCheck() {
+  const checked = document.querySelectorAll('.assignment-check:checked');
+  const bulkBar = document.getElementById('bulkBar');
+  bulkBar.style.display = checked.length > 0 ? 'flex' : 'none';
+  document.getElementById('selectedCount').textContent = `${checked.length} selected`;
+}
+
+function toggleSelectAll(cb) {
+  const rows = document.querySelectorAll('.assignment-check');
+  rows.forEach(r => {
+    const parentRow = r.closest('tr');
+    if (!parentRow || parentRow.style.display !== 'none') {
+      r.checked = cb.checked;
+    }
+  });
+  onRowCheck();
+}
+
+function clearSelection() {
+  document.querySelectorAll('.assignment-check').forEach(r => r.checked = false);
+  document.getElementById('bulkBar').style.display = 'none';
+}
+
+async function bulkMarkDone() {
+  const checked = document.querySelectorAll('.assignment-check:checked');
+  const promises = Array.from(checked).map(c =>
+    fetch(`/api/assignment/${c.value}/done`, {method: 'POST'})
+  );
+  await Promise.all(promises);
+  location.reload();
+}
+
+async function toggleDoneRow(id, btn, isDone) {
+  const resp = await fetch(`/api/assignment/${id}/toggle-complete`, {method: 'POST'});
+  const data = await resp.json();
+  const row = document.getElementById('arow-' + id);
+  if (data.new_status === 'submitted' || data.new_status === 'complete') {
+    btn.textContent = 'Undo';
+    btn.style.color = 'var(--muted)';
+    btn.style.borderColor = 'var(--border)';
+    if (row) { row.style.opacity = '0.55'; row.dataset.done = 'done'; }
+  } else {
+    btn.textContent = 'Done';
+    btn.style.color = 'var(--green)';
+    btn.style.borderColor = 'var(--green)';
+    if (row) { row.style.opacity = '1'; row.dataset.done = 'todo'; }
+  }
+  applyFilters();
+}
+</script>
 {% endblock %}

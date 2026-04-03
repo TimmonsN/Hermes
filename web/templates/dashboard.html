@@ -1,33 +1,470 @@
 {% extends "base.html" %}
 {% block title %} — Dashboard{% endblock %}
 
+{% block head %}
+<style>
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 700px) { .dash-grid { grid-template-columns: 1fr; } }
+  .dash-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .dash-card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .focus-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+  }
+  .focus-item:last-child { border-bottom: none; }
+  .focus-item-name { font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-item-meta { font-size: 11px; color: var(--muted); flex-shrink: 0; text-align: right; }
+  .week-at-glance { display: flex; gap: 4px; }
+  .wag-day {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .wag-day-label { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+  .wag-day-date { font-size: 10px; color: var(--muted); }
+  .wag-bar-wrap { width: 100%; background: var(--surface2); border-radius: 3px; height: 36px; display: flex; align-items: flex-end; }
+  .wag-bar { width: 100%; border-radius: 3px 3px 0 0; transition: height 0.3s; }
+  .wag-count { font-size: 9px; color: var(--muted); margin-top: 2px; }
+  .wag-today .wag-day-label { color: var(--accent); }
+  .grade-snap-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .grade-snap-row:last-child { border-bottom: none; }
+  .briefing-text { font-size: 13px; line-height: 1.7; color: var(--text); }
+  .exam-countdown {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .exam-pill {
+    flex: 1;
+    min-width: 120px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .exam-pill-days { font-size: 24px; font-weight: 700; color: var(--yellow); line-height: 1; }
+  .exam-pill-label { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .exam-pill-name { font-size: 12px; font-weight: 500; margin-top: 2px; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
   <h1>Good {{ greeting }}, Niko.</h1>
-  <div style="display:flex; gap:8px;">
-    <button class="btn btn-ghost" onclick="triggerSync()" style="font-size:12px;" id="syncBtn">Sync Canvas</button>
-    <button class="btn btn-ghost" onclick="reanalyze()" style="font-size:12px;" id="reanalyzeBtn">Re-analyze All</button>
+  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-ghost" onclick="triggerSync()" style="font-size:12px;" id="syncBtn">Sync Canvas</button>
+      <button class="btn btn-ghost" onclick="reanalyze()" style="font-size:12px;" id="reanalyzeBtn">Re-analyze All</button>
+    </div>
+    <div id="reanalyzeStatus" style="display:none; font-size:11px; color:var(--accent); align-items:center; gap:6px;">
+      <span style="display:inline-block; width:10px; height:10px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+      <span id="reanalyzeStatusText">Hermes is re-analyzing — this takes ~60s</span>
+    </div>
   </div>
 </div>
 <p class="subtitle">
   {{ today_str }} &nbsp;·&nbsp; {{ active_courses }} active courses &nbsp;·&nbsp; {{ total_upcoming }} upcoming
-  {% if today_hours %}&nbsp;·&nbsp; <span style="color:var(--accent)">~{{ today_hours }}h due today</span>{% endif %}
-  {% if week_hours %}&nbsp;·&nbsp; ~{{ week_hours }}h this week{% endif %}
+  {% if avg_grade %}&nbsp;·&nbsp; <span style="color:{% if avg_grade >= 90 %}var(--green){% elif avg_grade >= 80 %}var(--yellow){% else %}var(--red){% endif %}">avg {{ avg_grade }}%</span>{% endif %}
 </p>
 
+<!-- Quick stats bar -->
+<div class="quick-stats">
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--red)">{{ today_hours }}h</div>
+    <div class="quick-stat-label">Due Today</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--yellow)">{{ week_hours }}h</div>
+    <div class="quick-stat-label">This Week</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--accent)">{{ week_hours_logged }}h</div>
+    <div class="quick-stat-label">Logged This Week</div>
+  </div>
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:var(--green)">{{ completed_count }}</div>
+    <div class="quick-stat-label">Done This Semester</div>
+  </div>
+  {% if avg_grade %}
+  <div class="quick-stat">
+    <div class="quick-stat-val" style="color:{% if avg_grade >= 90 %}var(--green){% elif avg_grade >= 80 %}var(--yellow){% else %}var(--red){% endif %}">{{ avg_grade }}%</div>
+    <div class="quick-stat-label">Avg Grade</div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Work on this NOW -->
+{% if top_action %}
+<div style="background: linear-gradient(135deg, rgba(124,108,255,0.15), rgba(124,108,255,0.05)); border: 1px solid rgba(124,108,255,0.3); border-radius:12px; padding:16px 20px; margin-bottom:16px;">
+  <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--accent); margin-bottom:6px;">Work on this now</div>
+  <a href="/assignments/{{ top_action.id }}" style="font-size:17px; font-weight:700; color:var(--text); text-decoration:none;">{{ top_action.title }}</a>
+  <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+    {{ top_action.course_name }} &nbsp;·&nbsp; {{ top_action.workload_label or '' }} &nbsp;·&nbsp; {{ top_action.due_fmt or '' }}
+    {% if top_action.grade_impact_pct %}&nbsp;·&nbsp; <span style="color:var(--accent);">{{ top_action.grade_impact_pct }}% of final grade</span>{% endif %}
+  </div>
+</div>
+{% else %}
+<div style="background:rgba(74,222,128,0.06); border:1px solid rgba(74,222,128,0.2); border-radius:12px; padding:16px 20px; margin-bottom:16px;">
+  <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--green); margin-bottom:6px;">Clear Schedule</div>
+  <div style="font-size:15px; font-weight:600; color:var(--text);">No pending assignments — you're ahead of schedule.</div>
+  <div style="font-size:12px; color:var(--muted); margin-top:4px;">Use the extra time to review for upcoming exams or work on extra credit.</div>
+</div>
+{% endif %}
+
+<!-- You're Done For Today celebration -->
+{% if today_due_any and all_done_today %}
+<div style="background:rgba(74,222,128,0.12); border:1px solid rgba(74,222,128,0.35); border-radius:12px; padding:14px 20px; margin-bottom:14px; display:flex; align-items:center; gap:14px;">
+  <div style="font-size:28px;">✓</div>
+  <div>
+    <div style="font-size:15px; font-weight:700; color:var(--green);">All of today's work is done.</div>
+    <div style="font-size:12px; color:var(--muted); margin-top:2px;">Great work — use the extra time to review for exams or get ahead on upcoming assignments.</div>
+  </div>
+</div>
+{% endif %}
+
+<!-- Announcements Inbox -->
+{% if inbox_announcements %}
+<div style="background:var(--surface); border:1px solid rgba(124,108,255,0.25); border-radius:10px; padding:12px 18px; margin-bottom:14px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--accent);">Instructor Announcements</div>
+    <a href="/announcements" style="font-size:11px; color:var(--muted); text-decoration:none;">View all →</a>
+  </div>
+  {% for ann in inbox_announcements %}
+  <div style="padding:5px 0; border-bottom:1px solid var(--border); font-size:12px;">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px;">
+      <span style="font-weight:600; color:var(--text); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ ann.title }}</span>
+      <span style="color:var(--muted); font-size:10px; flex-shrink:0;">{{ ann.course_name }}</span>
+    </div>
+    {% if ann.message %}
+    <div style="color:var(--muted); font-size:11px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ (ann.message or '')[:120] }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Grade Recovery -->
+{% if grade_recovery %}
+<div style="background:rgba(74,222,128,0.07); border:1px solid rgba(74,222,128,0.2); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--green); margin-bottom:8px;">Grade Recovery — Resubmit These</div>
+  {% for r in grade_recovery %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(74,222,128,0.15); font-size:13px;">
+    <a href="/assignments/{{ r.id }}" style="color:var(--text); text-decoration:none; font-weight:500;">{{ r.title }}</a>
+    <span style="color:var(--green); font-size:12px; font-weight:600; flex-shrink:0; margin-left:8px;">+{{ r.grade_impact }}% final grade</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Daily Digest: what to do RIGHT NOW -->
+{% if daily_digest.overdue %}
+<div style="background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">OVERDUE — Still Submittable</div>
+  <div style="font-size:11px; color:var(--muted); margin-bottom:10px;">Hermes checked each course's late policy. These may still earn points.</div>
+  {% for a in daily_digest.overdue %}
+  <div style="padding:6px 0; border-bottom:1px solid rgba(248,113,113,0.2);">
+    <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--red); text-decoration:none; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ a.course_name }}</span>
+    </div>
+    {% if a.late_reason %}
+    <div style="font-size:11px; color:{% if a.late_certain %}var(--yellow){% else %}var(--muted){% endif %}; margin-top:2px;">
+      {{ a.late_reason }}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if daily_digest.grade_warnings %}
+<div style="background:rgba(248,113,113,0.07); border:1px solid rgba(248,113,113,0.25); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">Grade Warnings — Below Target</div>
+  {% for snap in daily_digest.grade_warnings %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(248,113,113,0.15); font-size:13px;">
+    <span style="font-weight:500;">{{ snap.name }}</span>
+    <span style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+      <span style="font-weight:700; color:var(--red);">{{ snap.current_avg }}%</span>
+      <span style="font-size:11px; color:var(--muted);">target {{ snap.target }}% &nbsp;·&nbsp; {{ (snap.target - snap.current_avg) | round(1) }}% below</span>
+      <a href="/grades" style="font-size:11px; color:var(--accent);">what to do →</a>
+    </span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if daily_digest.due_today or daily_digest.should_start_today or daily_digest.exam_countdown %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:14px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:10px;">Today's Action List</div>
+
+  {% if daily_digest.due_today %}
+  <div style="margin-bottom:8px;">
+    <div style="font-size:11px; color:var(--red); font-weight:600; margin-bottom:4px;">DUE TODAY</div>
+    {% for a in daily_digest.due_today %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ a.course_name }}</span>
+      <span class="badge badge-{{ a.priority }}" style="flex-shrink:0;">{{ a.priority }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if daily_digest.should_start_today %}
+  <div style="{% if daily_digest.due_today %}border-top:1px solid var(--border); padding-top:8px;{% endif %} margin-bottom:4px;">
+    <div style="font-size:11px; color:var(--accent); font-weight:600; margin-bottom:4px;">START TODAY</div>
+    {% for a in daily_digest.should_start_today[:3] %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">due {{ a.due_fmt }}</span>
+      <span class="tag" style="flex-shrink:0;">~{{ a.estimated_hours }}h</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if daily_digest.exam_countdown %}
+  <div style="{% if daily_digest.due_today or daily_digest.should_start_today %}border-top:1px solid var(--border); padding-top:8px;{% endif %}">
+    <div style="font-size:11px; color:var(--yellow); font-weight:600; margin-bottom:4px;">EXAMS COMING</div>
+    {% for e in daily_digest.exam_countdown %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; gap:8px;">
+      <a href="/exams/{{ e.id }}" style="color:var(--text); text-decoration:none; font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ e.title }}</a>
+      <span style="color:var(--yellow); font-size:12px; font-weight:700; flex-shrink:0;">{{ e.days_until }}d away</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- 2x2 info grid -->
+<div class="dash-grid">
+  <!-- Today's Focus -->
+  <div class="dash-card">
+    <div class="dash-card-title">Today's Focus</div>
+    {% if top_priority %}
+      {% for a in top_priority %}
+      <div class="focus-item">
+        <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; flex:1; min-width:0; overflow:hidden;">
+          <div class="focus-item-name" title="{{ a.title }}">{{ a.title }}</div>
+          <div style="font-size:11px; color:var(--muted); margin-top:1px;">{{ a.course_name }}</div>
+        </a>
+        <div class="focus-item-meta">
+          <span class="badge badge-{{ a.priority or 'medium' }}" style="display:block; text-align:center; margin-bottom:3px;">{{ a.priority or 'med' }}</span>
+          <span class="{{ a.due_class }}">{{ a.due_fmt or 'no date' }}</span>
+          {% if a.workload_label %}<br><span style="color:{{ a.workload_color }};">{{ a.workload_label }}</span>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Nothing urgent right now.</div>
+    {% endif %}
+  </div>
+
+  <!-- Grade Snapshot -->
+  <div class="dash-card">
+    <div class="dash-card-title">Grade Snapshot</div>
+    {% if grade_snapshot %}
+      {% for g in grade_snapshot %}
+      <div class="grade-snap-row">
+        <span style="font-weight:500;">{{ g.name }}</span>
+        <span style="display:flex; align-items:center; gap:6px;">
+          {% if g.current_avg is not none %}
+          <span style="font-weight:700; color:{% if g.current_avg >= 90 %}var(--green){% elif g.current_avg >= 80 %}var(--yellow){% else %}var(--red){% endif %}">{{ g.current_avg }}%</span>
+          <span style="font-size:10px; color:var(--muted);">{{ g.letter }}</span>
+          {% if not g.on_track %}<span style="font-size:10px; color:var(--red);">below target</span>{% endif %}
+          {% else %}
+          <span style="color:var(--muted); font-style:italic; font-size:11px;">no data</span>
+          {% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Sync Canvas to see grades.</div>
+    {% endif %}
+  </div>
+
+  <!-- This Week at a Glance -->
+  <div class="dash-card">
+    <div class="dash-card-title">This Week at a Glance</div>
+    {% if week_glance %}
+    <div class="week-at-glance">
+      {% for wd in week_glance %}
+      <div class="wag-day {% if wd.is_today %}wag-today{% endif %}">
+        <div class="wag-day-label">{{ wd.label }}</div>
+        <div class="wag-bar-wrap">
+          <div class="wag-bar" style="height:{% if wd.max_h > 0 %}{{ [wd.hours / wd.max_h * 30, 30]|min|int }}px{% else %}2px{% endif %}; background:{% if wd.hours == 0 %}var(--border){% elif wd.hours < 2 %}var(--green){% elif wd.hours < 4 %}var(--yellow){% elif wd.hours < 6 %}var(--orange){% else %}var(--red){% endif %};"></div>
+        </div>
+        {% if wd.count > 0 %}
+        <div class="wag-count">{{ wd.count }}</div>
+        {% else %}
+        <div class="wag-count">&nbsp;</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div style="font-size:10px; color:var(--muted); margin-top:6px; text-align:right;">bar height = estimated hours due</div>
+    {% else %}
+    <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">No upcoming assignments this week.</div>
+    {% endif %}
+  </div>
+
+  <!-- Hermes Briefing / Upcoming Exams -->
+  <div class="dash-card">
+    {% if week_synthesis %}
+    <div class="dash-card-title">Hermes Briefing</div>
+    <div class="briefing-text">{{ week_synthesis }}</div>
+    {% elif upcoming_exams %}
+    <div class="dash-card-title">Upcoming Exams</div>
+    <div class="exam-countdown">
+      {% for e in upcoming_exams[:2] %}
+      <div class="exam-pill" style="border-color:rgba(251,191,36,0.3);">
+        <div class="exam-pill-days">{{ e.days_until }}</div>
+        <div class="exam-pill-label">day{{ 's' if e.days_until != 1 else '' }} away</div>
+        <div class="exam-pill-name">{{ e.title[:30] }}{% if e.title|length > 30 %}…{% endif %}</div>
+        <div style="font-size:10px; color:var(--muted); margin-top:2px;">{{ e.course_name }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="dash-card-title">Hermes Briefing</div>
+    <div style="color:var(--muted); font-size:13px; font-style:italic; padding:8px 0;">Sync Canvas to generate a briefing.</div>
+    {% endif %}
+  </div>
+</div>
+
+
+{% if session_plan %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin-bottom:16px;">
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--accent); margin-bottom:10px;">Tonight's Study Plan (3h)</div>
+  {% for item in session_plan %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <div>
+      <span style="font-weight:600; color:var(--accent); margin-right:8px;">{{ item.session_hours }}h</span>
+      <a href="/assignments/{{ item.id }}" style="color:var(--text); text-decoration:none;">{{ item.title }}</a>
+      <span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ item.course_name }}</span>
+    </div>
+    <span style="color:var(--muted); font-size:11px; flex-shrink:0;">{{ item.due_fmt or '' }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
 <script>
+let _reanalyzePollTimer = null;
+
 async function triggerSync() {
-  document.getElementById('syncBtn').textContent = 'Syncing...';
+  const btn = document.getElementById('syncBtn');
+  btn.textContent = 'Syncing...';
+  btn.disabled = true;
   await fetch('/api/sync', {method:'POST'});
-  setTimeout(() => { document.getElementById('syncBtn').textContent = 'Sync Canvas'; location.reload(); }, 5000);
+  setTimeout(() => { btn.textContent = 'Sync Canvas'; btn.disabled = false; location.reload(); }, 8000);
 }
+
 async function reanalyze() {
   if (!confirm('Clear all AI analysis and re-run? Takes about a minute.')) return;
-  document.getElementById('reanalyzeBtn').textContent = 'Working...';
+  const btn = document.getElementById('reanalyzeBtn');
+  btn.textContent = 'Working...';
+  btn.disabled = true;
   await fetch('/api/reanalyze', {method:'POST'});
-  setTimeout(() => { location.reload(); }, 60000);
+  showReanalyzeStatus('Hermes is re-analyzing — this takes ~60s');
+  startReanalyzePoll();
 }
+
+function showReanalyzeStatus(msg) {
+  const el = document.getElementById('reanalyzeStatus');
+  el.style.display = 'flex';
+  document.getElementById('reanalyzeStatusText').textContent = msg;
+}
+
+function hideReanalyzeStatus() {
+  document.getElementById('reanalyzeStatus').style.display = 'none';
+}
+
+function startReanalyzePoll() {
+  if (_reanalyzePollTimer) clearInterval(_reanalyzePollTimer);
+  _reanalyzePollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/sync-status');
+      const data = await resp.json();
+      if (data.status === 'done') {
+        clearInterval(_reanalyzePollTimer);
+        _reanalyzePollTimer = null;
+        showReanalyzeStatus('Analysis complete — refreshing...');
+        setTimeout(() => location.reload(), 1500);
+      } else if (data.status === 'running') {
+        const pct = data.progress || 0;
+        if (pct > 0) {
+          showReanalyzeStatus(`Re-analyzing assignments… ${pct}% done`);
+        } else if (data.started) {
+          const elapsed = Math.round((Date.now() - new Date(data.started).getTime()) / 1000);
+          showReanalyzeStatus(`Re-analyzing… ${elapsed}s`);
+        }
+      }
+    } catch(e) {}
+  }, 3000);
+}
+
+// On load: resume polling if analysis is in flight, or ensure spinner is hidden
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const resp = await fetch('/api/sync-status');
+    const data = await resp.json();
+    if (data.status === 'running') {
+      // Guard: if started > 10 minutes ago without finishing, treat as stale
+      const stale = data.started && (Date.now() - new Date(data.started).getTime()) > 600000;
+      if (!stale) {
+        document.getElementById('reanalyzeBtn').textContent = 'Working...';
+        document.getElementById('reanalyzeBtn').disabled = true;
+        showReanalyzeStatus('Hermes is re-analyzing — this takes ~60s');
+        startReanalyzePoll();
+        return;
+      }
+    }
+    // Not running (or stale) — make sure spinner is hidden
+    hideReanalyzeStatus();
+  } catch(e) {}
+});
 </script>
+
+{% if proactive_warnings %}
+  {% for w in proactive_warnings %}
+  <div class="warning-card {{ w.level }}">
+    <div class="warning-icon">{% if w.icon == 'fire' %}🔥{% elif w.icon == 'exam' %}📝{% elif w.icon == 'stack' %}📚{% elif w.icon == 'clock' %}⏰{% elif w.icon == 'bonus' %}⭐{% else %}⚠️{% endif %}</div>
+    <div>{{ w.message }}</div>
+  </div>
+  {% endfor %}
+{% endif %}
 
 {% if collision_alerts %}
   {% for col in collision_alerts %}
@@ -44,7 +481,7 @@ async function reanalyze() {
   <div class="card" id="card-{{ a.id }}" style="border-left: 3px solid var(--red);">
     <div class="card-header">
       <div>
-        <div class="card-title">{{ a.title }}</div>
+        <div class="card-title"><a href="/assignments/{{ a.id }}" style="color:inherit;text-decoration:none;">{{ a.title }}</a></div>
         <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}</div>
       </div>
       <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
@@ -80,7 +517,7 @@ async function reanalyze() {
   <div class="card" id="card-{{ a.id }}">
     <div class="card-header">
       <div>
-        <div class="card-title">{{ a.title }}</div>
+        <div class="card-title"><a href="/assignments/{{ a.id }}" style="color:inherit;text-decoration:none;">{{ a.title }}</a></div>
         <div class="card-sub">{{ a.course_name }} &nbsp;·&nbsp; Due {{ a.due_fmt }}{% if a.start_by_fmt %} &nbsp;·&nbsp; <span style="color:var(--accent)">Start {{ a.start_by_fmt }}</span>{% endif %}</div>
       </div>
       <span class="badge badge-{{ a.priority }}">{{ a.priority }}</span>
@@ -90,10 +527,9 @@ async function reanalyze() {
       {% if a.assignment_type %}<span class="tag">{{ a.assignment_type }}</span>{% endif %}
       {% if a.has_early_bonus %}<span class="tag tag-bonus">early bonus</span>{% endif %}
       {% if a.can_resubmit %}<span class="tag tag-bonus">resubmittable</span>{% endif %}
-      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;">Open</a>{% endif %}
       <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;color:var(--green);border-color:var(--green);" onclick="markDone('{{ a.id }}', this)">Mark Done</button>
       <button class="btn btn-ghost" style="padding:2px 10px;font-size:12px;" onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
-      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;margin-left:auto;">Open</a>{% endif %}
+      {% if a.html_url %}<a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost" style="padding:2px 10px;font-size:12px;margin-left:auto;">Open in Canvas</a>{% endif %}
     </div>
   </div>
   {% endfor %}
@@ -136,11 +572,13 @@ async function reanalyze() {
   <div class="card" style="padding:12px 20px;">
     {% for a in coming_up %}
     <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
-      <div>
-        <span style="font-weight:500;">{{ a.title }}</span>
-        <span style="color:var(--muted); margin-left:8px; font-size:12px;">{{ a.course_name }}</span>
-      </div>
-      <span style="color:var(--muted); font-size:12px;">{{ a.due_fmt }}</span>
+      <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; display:contents;">
+        <div>
+          <span style="font-weight:500;">{{ a.title }}</span>
+          <span style="color:var(--muted); margin-left:8px; font-size:12px;">{{ a.course_name }}</span>
+        </div>
+        <span style="color:var(--muted); font-size:12px;">{{ a.due_fmt }}</span>
+      </a>
     </div>
     {% endfor %}
   </div>

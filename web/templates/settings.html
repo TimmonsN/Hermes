@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% block title %} — Settings{% endblock %}
+
+{% block head %}
+<style>
+  .settings-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .settings-section h3 {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .settings-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    gap: 12px;
+  }
+  .settings-row:last-child { border-bottom: none; }
+  .settings-label { color: var(--muted); flex-shrink: 0; }
+  .settings-value { font-weight: 500; text-align: right; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 6px;
+  }
+  .status-dot.ok { background: var(--green); }
+  .status-dot.warn { background: var(--yellow); }
+  .status-dot.error { background: var(--red); }
+  .course-toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .course-toggle-row:last-child { border-bottom: none; }
+  .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--border);
+    border-radius: 20px;
+    transition: 0.2s;
+  }
+  .toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 14px; width: 14px;
+    left: 3px; bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.2s;
+  }
+  input:checked + .toggle-slider { background: var(--accent); }
+  input:checked + .toggle-slider:before { transform: translateX(16px); }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+<p class="subtitle">Canvas connection, sync schedule, and course visibility</p>
+
+<!-- API Keys -->
+<div class="settings-section">
+  <h3>API Keys</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+    Changes are written to <code style="font-size:11px; background:var(--surface2); padding:1px 5px; border-radius:4px;">.env</code> and take effect after the daemon restarts.
+    Leave a field blank to keep the current value.
+  </p>
+  <div class="settings-row">
+    <span class="settings-label">Canvas Token</span>
+    <span class="settings-value" style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:11px; color:{% if canvas_token_set %}var(--green){% else %}var(--red){% endif %}; font-family:monospace;">{{ canvas_token_masked or 'not set' }}</span>
+      <input type="password" id="canvasTokenInput" placeholder="paste new token…"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:12px; padding:4px 8px; border-radius:6px; width:200px; font-family:monospace;" />
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Gemini API Key</span>
+    <span class="settings-value" style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:11px; color:{% if gemini_key_set %}var(--green){% else %}var(--red){% endif %}; font-family:monospace;">{{ gemini_key_masked or 'not set' }}</span>
+      <input type="password" id="geminiKeyInput" placeholder="paste new key…"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:12px; padding:4px 8px; border-radius:6px; width:200px; font-family:monospace;" />
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Groq API Key</span>
+    <span class="settings-value" style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:11px; color:{% if groq_key_set %}var(--green){% else %}var(--red){% endif %}; font-family:monospace;">{{ groq_key_masked or 'not set' }}</span>
+      <input type="password" id="groqKeyInput" placeholder="paste new key…"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:12px; padding:4px 8px; border-radius:6px; width:200px; font-family:monospace;" />
+    </span>
+  </div>
+  <div style="margin-top:12px; display:flex; align-items:center; gap:10px;">
+    <button class="btn btn-primary" onclick="saveApiKeys()" style="font-size:13px;">Save Keys</button>
+    <span id="apiKeySaveStatus" style="font-size:12px; color:var(--muted); display:none;"></span>
+  </div>
+</div>
+
+<!-- Canvas Connection -->
+<div class="settings-section">
+  <h3>Canvas Connection</h3>
+  <div class="settings-row">
+    <span class="settings-label">API Token</span>
+    <span class="settings-value">
+      {% if token_display %}
+      <span class="status-dot ok"></span>{{ token_display }}
+      {% else %}
+      <span class="status-dot error"></span>Not configured
+      {% endif %}
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Canvas URL</span>
+    <span class="settings-value">{{ canvas_url or 'Not set' }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Canvas Sync</span>
+    <span class="settings-value">{{ last_sync[:16] | replace('T', ' ') if last_sync else 'Never' }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Analysis</span>
+    <span class="settings-value">{{ last_analysis[:16] | replace('T', ' ') if last_analysis else 'Never' }}</span>
+  </div>
+  <div style="margin-top:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+    <button class="btn btn-primary" onclick="triggerSync()" id="syncBtn">Sync Now</button>
+    <button class="btn btn-ghost" onclick="testCanvas()" id="testCanvasBtn" style="font-size:13px;">Test Canvas Connection</button>
+    <span id="syncStatus" style="font-size:12px; color:var(--muted);"></span>
+  </div>
+  <div id="canvasTestResult" style="font-size:12px; margin-top:8px; display:none;"></div>
+</div>
+
+<!-- Piazza Integration -->
+<div class="settings-section">
+  <h3>Piazza Integration</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Piazza posts are pulled automatically when Hermes syncs. Configure your network ID here to match course discussion threads to assignments.</p>
+  <div class="settings-row">
+    <span class="settings-label">Account</span>
+    <span class="settings-value">{{ piazza_email if piazza_email else '<span style="color:var(--muted); font-style:italic;">Not configured in .env</span>' | safe }}</span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Network ID</span>
+    <span class="settings-value">
+      <input type="text" id="piazzaNid" value="{{ piazza_nid }}"
+             placeholder="e.g. ly1234abcde"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:13px; padding:4px 10px; border-radius:6px; width:180px; font-family:inherit;"
+             oninput="savePiazzaNid(this.value)" />
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Last Piazza Sync</span>
+    <span class="settings-value">{{ last_piazza_sync[:16] | replace('T', ' ') if last_piazza_sync else 'Never' }}</span>
+  </div>
+  <div id="piazzaSaveStatus" style="font-size:12px; color:var(--green); margin-top:6px; display:none;">Saved. Hermes will use this Network ID on the next sync.</div>
+</div>
+
+<!-- Sync Schedule -->
+<div class="settings-section">
+  <h3>Sync Schedule</h3>
+  <div class="settings-row">
+    <span class="settings-label">Sync time 1</span>
+    <span class="settings-value">
+      <select id="syncHour1" class="toggle-switch" style="width:auto; padding:2px 6px; background:var(--surface2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; font-size:13px;" onchange="saveSyncSchedule()">
+        {% for h in range(6, 24) %}
+        <option value="{{ h }}" {% if h == sync_hour_1 %}selected{% endif %}>{{ '%d:00 %s'|format(h if h <= 12 else h - 12, 'AM' if h < 12 else 'PM') }}</option>
+        {% endfor %}
+      </select>
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Sync time 2</span>
+    <span class="settings-value">
+      <select id="syncHour2" class="toggle-switch" style="width:auto; padding:2px 6px; background:var(--surface2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; font-size:13px;" onchange="saveSyncSchedule()">
+        {% for h in range(6, 24) %}
+        <option value="{{ h }}" {% if h == sync_hour_2 %}selected{% endif %}>{{ '%d:00 %s'|format(h if h <= 12 else h - 12, 'AM' if h < 12 else 'PM') }}</option>
+        {% endfor %}
+      </select>
+    </span>
+  </div>
+  <div class="settings-row">
+    <span class="settings-label">Daily digest</span>
+    <span class="settings-value">{{ digest_hour }}:05 {{ 'AM' if digest_hour < 12 else 'PM' }}</span>
+  </div>
+  <div style="margin-top:10px; font-size:12px; color:var(--muted);">
+    Sync schedule changes apply immediately. Hermes reads these from the database on each run.
+  </div>
+  <div id="syncSchedStatus" style="font-size:12px; color:var(--green); margin-top:6px; display:none;">Saved!</div>
+</div>
+
+<!-- Grade Targets -->
+{% if courses_with_targets %}
+<div class="settings-section">
+  <h3>Grade Targets</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Set your target grade for each course. Hermes uses these to calculate what you need on remaining work.</p>
+  {% for c in courses_with_targets %}
+  <div class="settings-row">
+    <div>
+      <span style="font-weight:500;">{{ c.name[:40] }}</span>
+      {% if c.code %}<span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ c.code }}</span>{% endif %}
+      {% if c.current_avg is not none %}
+      <span style="font-size:11px; color:{% if c.current_avg >= c.target %}var(--green){% else %}var(--red){% endif %}; margin-left:8px;">{{ c.current_avg }}% current</span>
+      {% endif %}
+    </div>
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span style="font-size:11px; color:var(--muted);">Target:</span>
+      <input type="number" min="0" max="100" value="{{ c.target }}"
+             style="background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:13px; padding:4px 8px; border-radius:6px; width:60px; text-align:center; font-family:inherit;"
+             oninput="setGoalFromSettings('{{ c.id }}', this.value)" />
+      <span style="font-size:11px; color:var(--muted);">%</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Course Visibility -->
+{% if courses %}
+<div class="settings-section">
+  <h3>Course Visibility</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Toggle courses on/off. Hidden courses are excluded from all views and alerts.</p>
+  {% for c in courses %}
+  <div class="course-toggle-row">
+    <div>
+      <span style="font-weight:500;">{{ c.name }}</span>
+      {% if c.code %}<span style="color:var(--muted); font-size:11px; margin-left:6px;">{{ c.code }}</span>{% endif %}
+    </div>
+    <label class="toggle-switch">
+      <input type="checkbox" {% if not c.is_ignored %}checked{% endif %}
+             onchange="toggleCourse('{{ c.id }}', !this.checked)" />
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+async function triggerSync() {
+  const btn = document.getElementById('syncBtn');
+  const status = document.getElementById('syncStatus');
+  btn.textContent = 'Syncing...';
+  btn.disabled = true;
+  status.textContent = 'Sync started...';
+  try {
+    await fetch('/api/sync', {method: 'POST'});
+    status.textContent = 'Sync started in background. Refresh in ~30s.';
+    setTimeout(() => {
+      btn.textContent = 'Sync Now';
+      btn.disabled = false;
+    }, 5000);
+  } catch(e) {
+    status.textContent = 'Error starting sync.';
+    btn.textContent = 'Sync Now';
+    btn.disabled = false;
+  }
+}
+
+async function toggleCourse(courseId, ignored) {
+  await fetch(`/api/course/${courseId}/ignore`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ignored: ignored})
+  });
+}
+
+async function saveSyncSchedule() {
+  const h1 = parseInt(document.getElementById('syncHour1').value);
+  const h2 = parseInt(document.getElementById('syncHour2').value);
+  await fetch('/api/settings/sync-schedule', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sync_hour_1: h1, sync_hour_2: h2})
+  });
+  const status = document.getElementById('syncSchedStatus');
+  status.style.display = 'block';
+  setTimeout(() => { status.style.display = 'none'; }, 2000);
+}
+
+async function testCanvas() {
+  const btn = document.getElementById('testCanvasBtn');
+  const result = document.getElementById('canvasTestResult');
+  btn.textContent = 'Testing...';
+  btn.disabled = true;
+  result.style.display = 'block';
+  result.textContent = 'Connecting to Canvas...';
+  result.style.color = 'var(--muted)';
+  try {
+    const r = await fetch('/api/test-canvas');
+    const data = await r.json();
+    if (data.ok) {
+      result.innerHTML = `<span style="color:var(--green);">Connected — ${data.courses} active course${data.courses !== 1 ? 's' : ''} found. Last sync: ${data.last_sync.replace('T', ' ').slice(0, 16)}.</span>`;
+    } else {
+      result.innerHTML = `<span style="color:var(--red);">Connection failed: ${data.error || 'unknown error'}</span>`;
+    }
+  } catch(e) {
+    result.innerHTML = `<span style="color:var(--red);">Request failed — is the server running?</span>`;
+  }
+  btn.textContent = 'Test Canvas Connection';
+  btn.disabled = false;
+}
+
+let _goalTimers = {};
+function setGoalFromSettings(courseId, target) {
+  target = parseFloat(target);
+  if (isNaN(target)) return;
+  clearTimeout(_goalTimers[courseId]);
+  _goalTimers[courseId] = setTimeout(async () => {
+    await fetch(`/api/grade-goal/${courseId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target})
+    });
+  }, 600);
+}
+
+async function saveApiKeys() {
+  const canvas = document.getElementById('canvasTokenInput').value.trim();
+  const gemini = document.getElementById('geminiKeyInput').value.trim();
+  const groq   = document.getElementById('groqKeyInput').value.trim();
+  if (!canvas && !gemini && !groq) {
+    const s = document.getElementById('apiKeySaveStatus');
+    s.textContent = 'Nothing to save — fill in at least one field.';
+    s.style.color = 'var(--yellow)';
+    s.style.display = 'block';
+    return;
+  }
+  const status = document.getElementById('apiKeySaveStatus');
+  status.textContent = 'Saving…';
+  status.style.color = 'var(--muted)';
+  status.style.display = 'block';
+  try {
+    const r = await fetch('/api/settings/api-keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({canvas_token: canvas, gemini_api_key: gemini, groq_api_key: groq})
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      status.textContent = `Saved ${data.updated} key${data.updated !== 1 ? 's' : ''} to .env — restart the daemon for changes to take effect.`;
+      status.style.color = 'var(--green)';
+      document.getElementById('canvasTokenInput').value = '';
+      document.getElementById('geminiKeyInput').value = '';
+      document.getElementById('groqKeyInput').value = '';
+    } else {
+      status.textContent = 'Save failed.';
+      status.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    status.textContent = 'Request failed.';
+    status.style.color = 'var(--red)';
+  }
+}
+
+let _piazzaTimer = null;
+function savePiazzaNid(nid) {
+  clearTimeout(_piazzaTimer);
+  _piazzaTimer = setTimeout(async () => {
+    await fetch('/api/settings/piazza', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({piazza_nid: nid})
+    });
+    const status = document.getElementById('piazzaSaveStatus');
+    status.style.display = 'block';
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+  }, 800);
+}
+</script>
+{% endblock %}

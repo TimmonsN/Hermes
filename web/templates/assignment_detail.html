@@ -98,6 +98,147 @@
     font-size: 13px;
   }
   .bonus-block strong { color: var(--accent); }
+  /* Time breakdown */
+  .time-breakdown {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .time-pill {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .time-pill strong { color: var(--text); }
+  /* Notes */
+  .note-textarea {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 12px;
+    resize: vertical;
+    min-height: 100px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+  .note-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .note-saved {
+    font-size: 11px;
+    color: var(--green);
+    margin-top: 4px;
+    display: none;
+  }
+  /* Checklist */
+  .checklist-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .checklist-item:last-child { border-bottom: none; }
+  .checklist-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+  .checklist-text.done {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+  .checklist-delete {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .checklist-delete:hover { color: var(--red); }
+  .checklist-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .checklist-add-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .checklist-add-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+  .checklist-add-input:focus { outline: none; border-color: var(--accent); }
+  /* Time spent */
+  .time-log-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .time-input {
+    width: 80px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .time-input:focus { outline: none; border-color: var(--accent); }
+  /* Grade entry */
+  .grade-entry-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .grade-input {
+    width: 80px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 14px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .grade-input:focus { outline: none; border-color: var(--accent); }
+  .grade-result {
+    font-size: 18px;
+    font-weight: 700;
+  }
+  .gpa-meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
 </style>
 {% endblock %}
 
@@ -119,22 +260,31 @@
     <span class="sep">·</span>
     <span>{{ a.points_possible }} pts</span>
     {% endif %}
+    {% if checklist_stats.total > 0 %}
+    <span class="sep">·</span>
+    <span style="color:var(--accent)">{{ checklist_stats.done }}/{{ checklist_stats.total }} steps done ({{ checklist_stats.pct }}%)</span>
+    {% endif %}
   </div>
 
   <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
     <span class="badge badge-{{ a.priority or 'medium' }}">{{ a.priority or 'medium' }}</span>
 
-    {% if a.difficulty %}
-    <div class="diff-dots" title="Difficulty {{ a.difficulty }}/10">
-      {% for i in range(1, 11) %}
-      <div class="diff-dot {% if i <= a.difficulty %}{% if a.difficulty >= 8 %}critical{% elif a.difficulty >= 6 %}high{% else %}filled{% endif %}{% endif %}"></div>
-      {% endfor %}
-    </div>
-    <span style="color:var(--muted); font-size:12px;">{{ a.difficulty }}/10</span>
+    {% if a.workload_label %}
+    <span class="tag" style="color:{{ a.workload_color }}; border-color:{{ a.workload_color }}; background:rgba(0,0,0,0.1);">
+      {{ a.workload_label }}
+    </span>
     {% endif %}
 
     {% if a.estimated_hours %}
     <span class="tag">~{{ a.estimated_hours }}h estimated</span>
+    {% endif %}
+
+    {% if grade_impact_pct is not none %}
+    <span style="font-size:12px; color:var(--yellow); font-weight:600;" title="Percentage of your final course grade this assignment is worth">
+      {{ grade_impact_pct }}% of final grade
+    </span>
+    {% elif course_weight_context %}
+    <span style="font-size:12px; color:var(--muted);">{{ course_weight_context }}</span>
     {% endif %}
 
     {% if a.start_by_fmt %}
@@ -144,19 +294,73 @@
     {% if a.assignment_type %}
     <span class="tag">{{ a.assignment_type }}</span>
     {% endif %}
+
+    {% if time_spent > 0 %}
+    <span class="tag" style="color:var(--green);">{{ "%.0f"|format(time_spent / 60) }}h logged</span>
+    {% endif %}
   </div>
+
+  {% if time_breakdown %}
+  <div class="time-breakdown">
+    {% for phase, hrs in time_breakdown.items() %}
+    {% if hrs and hrs > 0 %}
+    <div class="time-pill"><strong>{{ phase | replace('_', ' ') | title }}</strong>: {{ hrs }}h</div>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
+
+<!-- Deadline urgency banner (only for pending/overdue assignments) -->
+{% if a.status not in ('submitted', 'complete') and a.due_fmt and hrs_until_due is not none %}
+  {% if hrs_until_due < 0 %}
+  <div style="background:rgba(248,113,113,0.12); border:1px solid rgba(248,113,113,0.4); border-radius:10px; padding:12px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+    <div>
+      <span style="color:var(--red); font-weight:700; font-size:14px;">OVERDUE</span>
+      <span style="color:var(--muted); font-size:13px; margin-left:10px;">Was due {{ a.due_fmt }}</span>
+    </div>
+    {% if late_policy_accepted is not none %}
+      {% if late_policy_accepted %}
+      <span style="color:var(--yellow); font-size:12px; font-weight:600;">Late submission may be accepted — {{ late_policy_reason }}</span>
+      {% else %}
+      <span style="color:var(--red); font-size:12px;">Hermes determined late submissions are not accepted for this course.</span>
+      {% endif %}
+    {% else %}
+    <span style="color:var(--muted); font-size:12px;">Late policy not found in syllabus — check with instructor.</span>
+    {% endif %}
+  </div>
+  {% elif hrs_until_due <= 48 %}
+  <div style="background:{% if hrs_until_due < 6 %}rgba(248,113,113,0.12){% elif hrs_until_due < 24 %}rgba(251,146,60,0.10){% else %}rgba(251,191,36,0.08){% endif %}; border:1px solid {% if hrs_until_due < 6 %}rgba(248,113,113,0.4){% elif hrs_until_due < 24 %}rgba(251,146,60,0.4){% else %}rgba(251,191,36,0.3){% endif %}; border-radius:10px; padding:12px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+    <div>
+      <span style="color:{% if hrs_until_due < 6 %}var(--red){% elif hrs_until_due < 24 %}var(--orange){% else %}var(--yellow){% endif %}; font-weight:700; font-size:14px;">
+        {% if hrs_until_due < 1 %}{{ (hrs_until_due * 60)|int }}min left
+        {% elif hrs_until_due < 24 %}{{ hrs_until_due|int }}h {{ ((hrs_until_due - hrs_until_due|int) * 60)|int }}min left
+        {% else %}{{ hrs_until_due|int }}h left
+        {% endif %}
+      </span>
+      <span style="color:var(--muted); font-size:13px; margin-left:10px;">Due {{ a.due_fmt }}</span>
+    </div>
+    {% if a.html_url %}
+    <a href="{{ a.html_url }}" target="_blank" style="font-size:12px; color:var(--accent); font-weight:600; text-decoration:none; white-space:nowrap;">Open in Canvas to Submit →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endif %}
 
 <!-- Action row -->
 <div class="action-row">
+  {% if a.html_url and a.status not in ('submitted', 'complete') %}
+  <a href="{{ a.html_url }}" target="_blank" class="btn btn-primary" style="text-decoration:none;">Open in Canvas to Submit →</a>
+  {% endif %}
   <button class="btn btn-ghost" style="color:var(--green); border-color:var(--green);"
           onclick="markDone('{{ a.id }}', this)">Mark Done</button>
   <button class="btn btn-ghost"
           onclick="showDiffEdit('{{ a.id }}', {{ a.difficulty or 5 }}, {{ a.estimated_hours or 2 }})">Edit Difficulty</button>
-  {% if a.html_url %}
+  <button class="btn btn-ghost" onclick="forceReanalyze('{{ a.id }}', this)" title="Clear stale analysis and re-analyze with current course materials">Re-analyze</button>
+  {% if a.html_url and a.status in ('submitted', 'complete') %}
   <a href="{{ a.html_url }}" target="_blank" class="btn btn-ghost">Open in Canvas ↗</a>
   {% endif %}
-  <a href="/chat" class="btn btn-ghost" style="margin-left:auto;">Chat about this →</a>
+  <a href="/chat/assignment/{{ a.id }}" class="btn btn-ghost" style="margin-left:auto;">Chat with Hermes →</a>
 </div>
 
 <!-- Early bonus / resubmit -->
@@ -174,8 +378,54 @@
 </div>
 {% endif %}
 
+{% if grade_impact_pct is not none or course_strategy_note or needed_on_assignment %}
+<div class="bonus-block" style="background:rgba(124,108,255,0.05); border-color:rgba(124,108,255,0.2);">
+  <strong>Course Impact</strong> —
+  {% if grade_impact_pct is not none %}
+    This assignment is worth <strong>{{ grade_impact_pct }}%</strong> of your final grade in {{ a.course_name }}.
+  {% endif %}
+  {% if needed_on_assignment is not none %}
+    <span style="color:var(--yellow);"> To hit your {{ course_target }}% target, you need at least <strong>{{ needed_on_assignment }}%</strong> on this assignment.</span>
+  {% endif %}
+  {% if course_strategy_note %}<span style="color:var(--muted);">{{ course_strategy_note }}</span>{% endif %}
+</div>
+{% endif %}
+
+{# Category context: show how this assignment fits within its grade category #}
+{% if category_impact %}
+<div class="bonus-block" style="background:rgba(251,191,36,0.05); border-color:rgba(251,191,36,0.2); font-size:13px;">
+  <strong>Category Context</strong> — This assignment is 1 of {{ category_impact.group_count }}
+  in <strong>{{ category_impact.group_name }}</strong>
+  ({{ category_impact.group_weight|int }}% of grade).
+  {% if category_impact.current_cat_avg is not none %}
+    Your current {{ category_impact.group_name }} avg is
+    <span style="color:{% if category_impact.current_cat_avg >= 90 %}var(--green){% elif category_impact.current_cat_avg >= 80 %}var(--yellow){% else %}var(--red){% endif %}; font-weight:600;">{{ category_impact.current_cat_avg }}%</span>.
+    {% if category_impact.impact_of_85 is not none %}
+      Scoring 85%+ here would bring it to
+      <span style="color:{% if category_impact.impact_of_85 >= 90 %}var(--green){% elif category_impact.impact_of_85 >= 80 %}var(--yellow){% else %}var(--orange){% endif %}; font-weight:600;">{{ category_impact.impact_of_85 }}%</span>.
+    {% endif %}
+  {% endif %}
+  {% if category_impact.score_for_c is not none or category_impact.score_for_a is not none %}
+  <div style="margin-top:6px; color:var(--muted);">
+    {% if category_impact.score_for_c is not none %}Score <strong>{{ category_impact.score_for_c }}%</strong> to bring category to a C (75%). {% endif %}
+    {% if category_impact.score_for_a is not none %}Score <strong>{{ category_impact.score_for_a }}%</strong> to bring category to an A (90%).{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if grade_obj %}
+<div class="info-block" style="border-color:rgba(74,222,128,0.25);">
+  <h3>Grade</h3>
+  <div style="font-size:22px; font-weight:700; color:{% if grade_obj.grade_pct >= 90 %}var(--green){% elif grade_obj.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">
+    {{ "%.1f"|format(grade_obj.grade_pct) }}%
+    <span style="font-size:14px; color:var(--muted); font-weight:400;">{{ grade_obj.points_earned }}/{{ grade_obj.points_possible }} pts</span>
+  </div>
+</div>
+{% endif %}
+
 <!-- Description -->
-{% if a.description %}
+{% if description_status == "real" and a.description %}
 <div class="info-block">
   <h3>Description</h3>
   <div class="description-content">
@@ -186,46 +436,230 @@
     {% endif %}
   </div>
 </div>
+{% elif description_status == "from_materials" %}
+<div class="info-block" style="border-color: rgba(124,108,255,0.2);">
+  <h3>Description</h3>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+    Canvas did not provide a description for this assignment. Hermes analyzed it using the course files below.
+  </div>
+  {% if course_materials %}
+  <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+    <span style="font-weight:600; color:var(--text);">Sources used:</span>
+    {% for m in course_materials %}
+    <span style="display:inline-block; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:2px 8px; margin:2px; font-size:11px;">{{ m.label }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% elif description_status == "blind_guess" %}
+<div class="info-block" style="border-color: rgba(248,113,113,0.2);">
+  <h3>Description</h3>
+  <div style="font-size:12px; color:var(--red); margin-bottom:4px; font-weight:600;">No description or course files available</div>
+  <div style="font-size:12px; color:var(--muted);">
+    Canvas provided no description and no matching course files were found. Hermes analyzed this from the course name and assignment title only — trigger a sync to import course materials.
+  </div>
+</div>
 {% endif %}
 
-<!-- Study suggestions -->
-{% if study_suggestions %}
+{% if schedule_scenarios %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.2);">
+  <h3>Schedule This</h3>
+  <div style="display:flex; gap:12px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:180px; background:{% if schedule_scenarios.feasible_now %}rgba(74,222,128,0.07){% else %}rgba(251,191,36,0.07){% endif %}; border:1px solid {% if schedule_scenarios.feasible_now %}rgba(74,222,128,0.25){% else %}rgba(251,191,36,0.25){% endif %}; border-radius:8px; padding:12px;">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:{% if schedule_scenarios.feasible_now %}var(--green){% else %}var(--yellow){% endif %}; margin-bottom:6px;">Start Tonight</div>
+      <div style="font-size:22px; font-weight:700; color:var(--text);">{{ schedule_scenarios.start_now.hrs_per_day }}h<span style="font-size:13px; font-weight:400; color:var(--muted);">/day</span></div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">spread over {{ schedule_scenarios.start_now.days }} day{% if schedule_scenarios.start_now.days != 1 %}s{% endif %}</div>
+    </div>
+    <div style="flex:1; min-width:180px; background:{% if schedule_scenarios.feasible_wait %}rgba(251,191,36,0.07){% else %}rgba(248,113,113,0.07){% endif %}; border:1px solid {% if schedule_scenarios.feasible_wait %}rgba(251,191,36,0.25){% else %}rgba(248,113,113,0.25){% endif %}; border-radius:8px; padding:12px;">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:{% if schedule_scenarios.feasible_wait %}var(--yellow){% else %}var(--red){% endif %}; margin-bottom:6px;">Wait Until Night Before</div>
+      <div style="font-size:22px; font-weight:700; color:var(--text);">{{ schedule_scenarios.wait.hrs_total }}h<span style="font-size:13px; font-weight:400; color:var(--muted);"> straight</span></div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">{{ schedule_scenarios.wait.days_away }} day{% if schedule_scenarios.wait.days_away != 1 %}s{% endif %} from now</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- How to Tackle This — study_strategy from AI -->
+{% if study_strategy %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.35); border-left:3px solid var(--accent);">
+  <h3 style="color:var(--accent);">How to Tackle This</h3>
+  <p style="font-size:14px; line-height:1.75; color:var(--text);">{{ study_strategy }}</p>
+</div>
+{% endif %}
+
+<!-- Hermes Analysis (shown for all analyzed assignments) -->
+{% if reasoning or study_suggestions or watch_outs %}
 <div class="info-block">
-  <h3>Study Suggestions</h3>
-  <ul class="suggestion-list">
+  <h3>Hermes Analysis</h3>
+  {% if reasoning %}
+  <p class="reasoning-text" style="margin-bottom: {% if task_sections or study_suggestions or watch_outs %}14px{% else %}0{% endif %};">{{ reasoning }}</p>
+  {% endif %}
+  {% if task_sections %}
+  <div style="margin-bottom:14px;">
+    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">What you're actually doing</div>
+    <ul class="suggestion-list">
+      {% for task in task_sections %}
+      <li>{{ task }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% if study_suggestions %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">How to approach it</div>
+  <ul class="suggestion-list" style="margin-bottom: {% if watch_outs %}14px{% else %}0{% endif %};">
     {% for tip in study_suggestions %}
     <li>{{ tip }}</li>
     {% endfor %}
   </ul>
-</div>
-{% endif %}
-
-<!-- Watch-outs -->
-{% if watch_outs %}
-<div class="info-block">
-  <h3>Watch Out For</h3>
+  {% endif %}
+  {% if watch_outs %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Watch out for</div>
   <ul class="suggestion-list watchout-list">
     {% for w in watch_outs %}
     <li>{{ w }}</li>
     {% endfor %}
   </ul>
+  {% endif %}
+</div>
+{% elif not a.analysis_json %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.15);">
+  <h3>Hermes Analysis</h3>
+  <p style="font-size:13px; color:var(--muted);">Analysis pending — Hermes will analyze this on the next analysis run. Trigger one from the dashboard if needed.</p>
 </div>
 {% endif %}
 
-<!-- AI Reasoning -->
-{% if reasoning %}
-<div class="info-block">
-  <h3>Hermes Reasoning</h3>
-  <p class="reasoning-text">{{ reasoning }}</p>
+<!-- Course Materials Hermes Is Using For This Assignment -->
+{% if course_materials %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.15);">
+  <h3>Sources Hermes Used
+    <span style="font-weight:400; color:var(--muted); margin-left:6px; font-size:11px;">{{ course_materials|length }} relevant file{{ 's' if course_materials|length != 1 }}</span>
+  </h3>
+  {% for m in course_materials %}
+  <div style="margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <span style="color:{% if m.kind == 'syllabus' %}var(--accent){% elif m.kind == 'page' %}var(--yellow){% else %}var(--green){% endif %}; font-size:13px; flex-shrink:0;">
+        {% if m.kind == 'syllabus' %}📋{% elif m.kind == 'page' %}📄{% else %}📁{% endif %}
+      </span>
+      <span style="color:var(--text); font-size:13px; font-weight:500; word-break:break-word;">{{ m.label }}</span>
+      <span style="color:var(--muted); font-size:11px; flex-shrink:0;">~{{ (m.chars / 1000)|round(1) }}k chars</span>
+    </div>
+    {% if m.snippet %}
+    <div style="font-size:12px; color:var(--muted); padding-left:24px; line-height:1.5; font-style:italic; border-left:2px solid var(--border); margin-left:4px;">
+      {{ m.snippet }}…
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
 </div>
 {% endif %}
+
+<!-- Piazza Discussions for this assignment -->
+{% set piazza_found = [] %}
+{% for m in course_materials %}{% if m.label.startswith("Piazza:") %}{% if piazza_found.append(m) %}{% endif %}{% endif %}{% endfor %}
+{% if piazza_found %}
+<div class="info-block" style="border-color:rgba(251,191,36,0.25);">
+  <h3>Piazza Discussions</h3>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Classmates asked about this assignment on Piazza — check before you start.</div>
+  {% for m in piazza_found %}
+  <div style="padding:6px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <span style="color:var(--yellow);">&#128172;</span>
+    <span style="margin-left:6px; color:var(--text);">{{ m.label[7:] }}</span>
+    {% if m.snippet %}
+    <div style="font-size:11px; color:var(--muted); margin-top:3px; padding-left:22px; font-style:italic;">{{ m.snippet[:200] }}...</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Instructor Announcements mentioning this assignment -->
+{% if relevant_announcements %}
+<div class="info-block">
+  <h3>Instructor Announcements</h3>
+  {% for ann in relevant_announcements %}
+  <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
+    <div style="font-size:13px; font-weight:600;">{{ ann.title }}</div>
+    <div style="font-size:12px; color:var(--muted); margin-top:4px;">{{ (ann.body or ann.message or '')[:300] }}{% if (ann.body or ann.message or '')|length > 300 %}...{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if office_hours and days_until is not none and days_until <= 5 %}
+<div style="font-size:12px; color:var(--muted); margin-top:-8px; margin-bottom:12px; padding:8px 14px; background:var(--surface); border:1px solid var(--border); border-radius:8px;">
+  Office hours: {{ office_hours }} — consider attending before this is due.
+</div>
+{% endif %}
+
+<!-- Notes -->
+<div class="info-block">
+  <h3>My Notes</h3>
+  <textarea class="note-textarea" id="noteArea" placeholder="Jot down your thoughts, plans, or reminders for this assignment..."
+    onblur="saveNote('{{ a.id }}', this.value)">{{ note_text }}</textarea>
+  <div class="note-saved" id="noteSaved">Saved</div>
+</div>
+
+<!-- Checklist -->
+<div class="info-block">
+  <h3>Progress Checklist</h3>
+  {% if checklist_stats.total > 0 %}
+  <div class="checklist-progress">
+    <div class="progress-bar" style="flex:1; height:6px;">
+      <div class="progress-fill" style="width:{{ checklist_stats.pct }}%;"></div>
+    </div>
+    <span>{{ checklist_stats.done }}/{{ checklist_stats.total }} ({{ checklist_stats.pct }}%)</span>
+  </div>
+  {% endif %}
+
+  <div id="checklist-container">
+    {% for item in checklist %}
+    <div class="checklist-item" id="ci-{{ item.id }}">
+      <input type="checkbox" class="checklist-checkbox"
+             {% if item.is_done %}checked{% endif %}
+             onchange="toggleItem({{ item.id }}, this)" />
+      <span class="checklist-text {% if item.is_done %}done{% endif %}" id="ct-{{ item.id }}">{{ item.item_text }}</span>
+      <button class="checklist-delete" onclick="deleteItem({{ item.id }})" title="Delete">×</button>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="checklist-add-row">
+    <input class="checklist-add-input" type="text" id="newItem"
+           placeholder="Add a step (e.g. 'Read chapter 3')"
+           onkeydown="if(event.key==='Enter') addItem('{{ a.id }}')" />
+    <button class="btn btn-ghost" onclick="addItem('{{ a.id }}')">Add</button>
+  </div>
+</div>
+
+<!-- Time Logger -->
+<div class="info-block">
+  <h3>Time Spent</h3>
+  <div style="font-size:13px; color:var(--muted); margin-bottom:8px;">
+    Total logged: <strong style="color:var(--text);" id="totalTime">{{ "%.0f"|format(time_spent) }} min ({{ "%.1f"|format(time_spent / 60) }}h)</strong>
+    {% if a.estimated_hours %} / ~{{ a.estimated_hours }}h estimated{% endif %}
+  </div>
+  <div class="time-log-row">
+    <input class="time-input" type="number" id="timeInput" min="1" placeholder="min" />
+    <button class="btn btn-ghost" onclick="logTime('{{ a.id }}')">Log Time</button>
+    <span style="font-size:12px; color:var(--muted);">minutes</span>
+  </div>
+</div>
 
 <script>
+const assignmentId = '{{ a.id }}';
+
 async function markDone(id, btn) {
   await fetch(`/api/assignment/${id}/done`, {method: 'POST'});
   btn.textContent = 'Done!';
   btn.style.opacity = '0.5';
   btn.disabled = true;
+}
+
+async function forceReanalyze(id, btn) {
+  btn.textContent = 'Queued...';
+  btn.disabled = true;
+  await fetch(`/api/assignment/${id}/reanalyze`, {method: 'POST'});
+  btn.textContent = 'Sync triggered — refresh in ~30s';
 }
 
 function showDiffEdit(id, currentDiff, currentHours) {
@@ -237,6 +671,84 @@ function showDiffEdit(id, currentDiff, currentHours) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({difficulty: parseInt(d), hours: h ? parseFloat(h) : null})
   }).then(() => location.reload());
+}
+
+// Notes
+let saveTimer;
+async function saveNote(id, note) {
+  clearTimeout(saveTimer);
+  await fetch(`/api/assignment/${id}/note`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note})
+  });
+  const el = document.getElementById('noteSaved');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 2000);
+}
+
+// Auto-save note on typing (debounced)
+document.getElementById('noteArea').addEventListener('input', function() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveNote(assignmentId, this.value), 1500);
+});
+
+// Checklist
+async function addItem(assignmentId) {
+  const input = document.getElementById('newItem');
+  const text = input.value.trim();
+  if (!text) return;
+  const resp = await fetch(`/api/assignment/${assignmentId}/checklist`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({item_text: text})
+  });
+  const data = await resp.json();
+  input.value = '';
+
+  const container = document.getElementById('checklist-container');
+  const div = document.createElement('div');
+  div.className = 'checklist-item';
+  div.id = 'ci-' + data.id;
+  div.innerHTML = `
+    <input type="checkbox" class="checklist-checkbox" onchange="toggleItem(${data.id}, this)" />
+    <span class="checklist-text" id="ct-${data.id}">${text}</span>
+    <button class="checklist-delete" onclick="deleteItem(${data.id})" title="Delete">×</button>
+  `;
+  container.appendChild(div);
+}
+
+async function toggleItem(id, cb) {
+  await fetch(`/api/checklist/${id}/toggle`, {method: 'POST'});
+  const textEl = document.getElementById('ct-' + id);
+  if (cb.checked) {
+    textEl.classList.add('done');
+  } else {
+    textEl.classList.remove('done');
+  }
+}
+
+async function deleteItem(id) {
+  await fetch(`/api/checklist/${id}`, {method: 'DELETE'});
+  const el = document.getElementById('ci-' + id);
+  if (el) el.remove();
+}
+
+// Time logging
+async function logTime(id) {
+  const input = document.getElementById('timeInput');
+  const minutes = parseInt(input.value);
+  if (isNaN(minutes) || minutes <= 0) return;
+  const resp = await fetch(`/api/assignment/${id}/time`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({minutes})
+  });
+  const data = await resp.json();
+  const total = data.total_minutes;
+  const hrs = (total / 60).toFixed(1);
+  document.getElementById('totalTime').textContent = `${total} min (${hrs}h)`;
+  input.value = '';
 }
 </script>
 {% endblock %}

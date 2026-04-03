@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %} — {{ e.title }}{% endblock %}
+
+{% block head %}
+<style>
+  .detail-header {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px 28px 20px;
+    margin-bottom: 20px;
+  }
+  .detail-title { font-size: 22px; font-weight: 700; line-height: 1.3; margin-bottom: 6px; }
+  .detail-meta {
+    color: var(--muted); font-size: 13px;
+    display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center;
+  }
+  .detail-meta .sep { color: var(--border); }
+  .info-block {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+  .info-block h3 {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--muted); margin-bottom: 12px;
+  }
+  .tip-list { list-style: none; padding: 0; margin: 0; }
+  .tip-list li {
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+    font-size: 13px; display: flex; gap: 8px;
+  }
+  .tip-list li:last-child { border-bottom: none; }
+  .tip-list li::before { content: "→"; color: var(--accent); flex-shrink: 0; }
+  .reasoning-text { font-size: 13px; color: var(--muted); font-style: italic; line-height: 1.6; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 16px;">
+  <a href="/exams" class="btn btn-ghost" style="font-size:12px; padding:6px 12px;">← Back to Exams</a>
+</div>
+
+<div class="detail-header" style="border-left: 3px solid var(--yellow);">
+  <div class="detail-title">{{ e.title }}</div>
+  <div class="detail-meta">
+    <span>{{ e.course_name }}</span>
+    {% if e.date_fmt %}
+    <span class="sep">·</span>
+    <span style="color:var(--yellow);">{{ e.date_fmt }}</span>
+    {% endif %}
+    {% if days_until_exam is not none %}
+    <span class="sep">·</span>
+    <span style="color:{% if days_until_exam <= 3 %}var(--red){% elif days_until_exam <= 7 %}var(--yellow){% else %}var(--muted){% endif %}; font-weight:600;">
+      {% if days_until_exam == 0 %}TODAY{% elif days_until_exam == 1 %}Tomorrow{% else %}{{ days_until_exam }} days away{% endif %}
+    </span>
+    {% endif %}
+  </div>
+
+  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+    <span class="badge badge-{{ e.priority or 'high' }}">{{ e.priority or 'high' }}</span>
+    {% if exam_group_weight %}
+    <span class="tag" style="color:var(--yellow); border-color:var(--yellow);">{{ exam_group_weight|int }}% of final grade</span>
+    {% endif %}
+    {% if e.study_hours_estimated %}
+    <span class="tag">~{{ e.study_hours_estimated }}h total study</span>
+    {% endif %}
+    {% if e.daily_study_hours %}
+    <span class="tag">~{{ e.daily_study_hours }}h/day</span>
+    {% endif %}
+    {% if e.start_study_fmt %}
+    <span class="tag tag-bonus">Start studying {{ e.start_study_fmt }}</span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Grade context -->
+{% if exam_group_weight or exam_category_current is not none %}
+<div class="info-block" style="border-color:rgba(251,191,36,0.3);">
+  <h3>Grade Stakes</h3>
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+    {% if exam_group_weight %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:var(--yellow); line-height:1;">{{ exam_group_weight|int }}%</div>
+      <div style="font-size:11px; color:var(--muted);">weight in final grade</div>
+    </div>
+    {% endif %}
+    {% if exam_category_current is not none %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:{% if exam_category_current >= 90 %}var(--green){% elif exam_category_current >= 80 %}var(--yellow){% else %}var(--red){% endif %}; line-height:1;">{{ exam_category_current }}%</div>
+      <div style="font-size:11px; color:var(--muted);">current {{ exam_category_name or 'exam' }} avg</div>
+    </div>
+    {% endif %}
+    {% if target_grade %}
+    <div>
+      <div style="font-size:28px; font-weight:700; color:var(--accent); line-height:1;">{{ target_grade|int }}%</div>
+      <div style="font-size:11px; color:var(--muted);">your target for this course</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if reasoning %}
+<div class="info-block">
+  <h3>Hermes Analysis</h3>
+  <p class="reasoning-text">{{ reasoning }}</p>
+</div>
+{% elif not e.analysis_json %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.15);">
+  <h3>Hermes Analysis</h3>
+  <p style="font-size:13px; color:var(--muted);">Analysis pending — will run on the next sync.</p>
+</div>
+{% endif %}
+
+{% if daily_study_plan %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.25);">
+  <h3>Daily Study Plan</h3>
+  {% for day in daily_study_plan %}
+  <div style="display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--border);">
+    <div style="width:36px; height:36px; border-radius:50%; background:var(--surface2); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; color:var(--accent); flex-shrink:0;">{{ day.day }}</div>
+    <div style="flex:1;">
+      <div style="font-size:13px; font-weight:500;">{{ day.focus }}</div>
+      <div style="font-size:11px; color:var(--muted);">{{ day.hours }}h</div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if study_tips %}
+<div class="info-block">
+  <h3>Study Tips</h3>
+  <ul class="tip-list">
+    {% for tip in study_tips %}
+    <li>{{ tip }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if recent_graded %}
+<div class="info-block">
+  <h3>Recent Graded Work — What the Exam Likely Covers</h3>
+  {% for a in recent_graded %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ a.id }}" style="color:var(--text); text-decoration:none; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ a.title }}</a>
+    {% if a.grade_pct is defined and a.grade_pct is not none %}
+    <span style="font-weight:600; margin-left:12px; flex-shrink:0; color:{% if a.grade_pct >= 90 %}var(--green){% elif a.grade_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">{{ "%.0f"|format(a.grade_pct) }}%</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if exam_topics and (exam_topics.weak_areas or exam_topics.upcoming) %}
+<div class="info-block" style="border-color:rgba(248,113,113,0.25);">
+  <h3>Focus Areas for This Exam</h3>
+  {% if exam_topics.weak_areas %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--red); margin-bottom:8px;">Review These First — Past Work Below 80%</div>
+  {% for item in exam_topics.weak_areas %}
+  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ item.id }}" style="color:var(--text); text-decoration:none;">{{ item.title }}</a>
+    <span style="font-weight:600; color:{% if item.grade_pct >= 70 %}var(--yellow){% else %}var(--red){% endif %}; flex-shrink:0; margin-left:8px;">{{ "%.0f"|format(item.grade_pct) }}%</span>
+  </div>
+  {% endfor %}
+  {% endif %}
+  {% if exam_topics.upcoming %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--accent); margin-top:{% if exam_topics.weak_areas %}12px{% else %}0{% endif %}; margin-bottom:8px;">These Likely Appear on the Exam</div>
+  {% for item in exam_topics.upcoming %}
+  <div style="padding:4px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <a href="/assignments/{{ item.id }}" style="color:var(--muted); text-decoration:none;">{{ item.title }}</a>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endif %}
+
+{% if e.description %}
+<div class="info-block">
+  <h3>Description</h3>
+  <div style="font-size:14px; line-height:1.7; color:var(--text);">
+    {% if '<' in e.description and '>' in e.description %}
+      {{ e.description | safe }}
+    {% else %}
+      <p>{{ e.description }}</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if course_notes %}
+<div class="info-block" style="border-color:rgba(124,108,255,0.2);">
+  <h3>Course Strategy Notes</h3>
+  <p style="font-size:13px; color:var(--muted); line-height:1.6;">{{ course_notes }}</p>
+</div>
+{% endif %}
+
+<div style="margin-top:8px;">
+  <a href="/chat" class="btn btn-ghost">Chat with Hermes about this exam →</a>
+</div>
+{% endblock %}

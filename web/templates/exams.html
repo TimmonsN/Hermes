@@ -11,29 +11,27 @@
 </div>
 {% else %}
 {% for e in exams %}
-<div class="card" style="border-left: 3px solid var(--yellow);">
+<a href="/exams/{{ e.id }}" style="text-decoration:none; color:inherit; display:block;">
+<div class="card" style="border-left: 3px solid var(--yellow); cursor:pointer; transition:border-color 0.15s;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--yellow)'">
   <div class="card-header">
     <div>
       <div class="card-title">{{ e.title }}</div>
       <div class="card-sub">{{ e.course_name }} &nbsp;·&nbsp; {{ e.date_fmt }}</div>
     </div>
-    <span class="badge badge-{{ e.priority or 'high' }}">{{ e.priority or 'high' }}</span>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span class="badge badge-{{ e.priority or 'high' }}">{{ e.priority or 'high' }}</span>
+      <span style="color:var(--muted); font-size:13px;">→</span>
+    </div>
   </div>
-  {% if e.study_hours_estimated or e.start_study_fmt or e.study_tips %}
+  {% if e.study_hours_estimated or e.start_study_fmt %}
   <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
     {% if e.study_hours_estimated %}<span class="tag">~{{ e.study_hours_estimated }}h total study</span>{% endif %}
     {% if e.daily_study_hours %}<span class="tag">~{{ e.daily_study_hours }}h/day</span>{% endif %}
     {% if e.start_study_fmt %}<span class="tag tag-bonus">Start studying {{ e.start_study_fmt }}</span>{% endif %}
   </div>
-  {% if e.study_tips %}
-  <div style="margin-top:12px; color:var(--muted); font-size:13px;">
-    {% for tip in e.study_tips %}
-    <div style="padding:3px 0;">· {{ tip }}</div>
-    {% endfor %}
-  </div>
-  {% endif %}
   {% endif %}
 </div>
+</a>
 {% endfor %}
 {% endif %}
 {% endblock %}

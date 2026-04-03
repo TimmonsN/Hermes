@@ -3,134 +3,164 @@
 
 {% block content %}
 <h1>Calendar</h1>
-<p class="subtitle">Next 4 weeks</p>
+<p class="subtitle">4-week view &nbsp;·&nbsp; starts Sunday</p>
+
+{% if week_synthesis %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin-bottom:20px; font-size:13px; line-height:1.6; color:var(--text);">
+  <span style="color:var(--accent); font-weight:600; margin-right:6px;">⟡ Hermes</span>{{ week_synthesis }}
+</div>
+{% endif %}
 
 <style>
-  .cal-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 8px;
-    margin-bottom: 24px;
-  }
-  .cal-header {
+  .cal-day-headers {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
     gap: 8px;
     margin-bottom: 4px;
   }
-  .cal-header-cell {
-    font-size: 11px;
+  .cal-day-header {
+    font-size: 10px;
     font-weight: 700;
     color: var(--muted);
     text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 0 8px;
-  }
-  .cal-week-label {
-    font-size: 11px;
-    color: var(--muted);
-    text-transform: uppercase;
     letter-spacing: 0.5px;
+    text-align: center;
+  }
+  .cal-week-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     margin: 20px 0 6px;
-    font-weight: 600;
+  }
+  .cal-week-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .cal-week-total { font-size: 11px; color: var(--accent); font-weight: 600; }
+
+  .cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+    margin-bottom: 8px;
   }
   .cal-cell {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 10px 8px;
+    overflow: hidden;  /* so the intensity bar clips to the cell's border-radius */
     min-height: 100px;
     transition: border-color 0.15s;
-  }
-  .cal-cell.today {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent-dim);
-  }
-  .cal-cell-day {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-bottom: 1px;
-  }
-  .cal-cell-date {
-    font-size: 11px;
-    color: var(--muted);
-    margin-bottom: 6px;
-  }
-  .cal-hours {
-    font-size: 10px;
-    color: var(--accent);
-    margin-bottom: 4px;
-  }
-  .cal-item {
-    font-size: 10px;
-    padding: 2px 0;
     display: flex;
-    align-items: center;
-    gap: 4px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex-direction: column;
   }
-  .cal-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+  .cal-cell:hover { border-color: var(--accent-dim); }
+  .cal-cell.today { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
+  .cal-cell.past { opacity: 0.45; }
+
+  /* Intensity bar sits at the very top of each cell */
+  .cal-intensity-bar {
+    width: 100%;
     flex-shrink: 0;
+    transition: height 0.3s ease;
   }
-  .cal-exam {
-    font-size: 10px;
-    color: var(--yellow);
-    padding: 2px 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .heat-none         { background: rgba(74,222,128,0.20); height: 3px; }
+  .heat-light        { background: rgba(74,222,128,0.55);  height: 4px; }
+  .heat-moderate     { background: rgba(251,191,36,0.65);  height: 7px; }
+  .heat-heavy        { background: rgba(251,146,60,0.75);  height: 11px; }
+  .heat-overwhelming { background: rgba(248,113,113,0.85); height: 16px; }
+
+  .cal-cell-body { padding: 8px; flex: 1; }
+  .cal-cell-day  { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 1px; }
+  .cal-cell-date { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .cal-hours     { font-size: 10px; color: var(--accent); margin-bottom: 4px; }
+  .cal-item {
+    font-size: 10px; padding: 2px 0;
+    display: flex; align-items: center; gap: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .cal-empty {
-    font-size: 10px;
-    color: var(--border);
-    margin-top: 4px;
+  .cal-dot   { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .cal-exam  { font-size: 10px; color: var(--yellow); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cal-empty { font-size: 10px; color: var(--green); margin-top: 4px; }
+  .cal-contributor {
+    font-size: 10px; color: var(--muted); padding: 2px 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-style: italic;
   }
+
+  .heat-legend {
+    display: flex; gap: 10px; align-items: center;
+    margin-bottom: 16px; font-size: 11px; color: var(--muted);
+  }
+  .heat-legend-swatch { width: 24px; height: 6px; border-radius: 2px; display: inline-block; }
 </style>
 
-{% set day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] %}
+<div class="heat-legend">
+  Workload:
+  <span class="heat-legend-swatch" style="background:rgba(74,222,128,0.20); border:1px solid rgba(74,222,128,0.35);"></span> Clear
+  <span class="heat-legend-swatch" style="background:rgba(74,222,128,0.55);"></span> Light
+  <span class="heat-legend-swatch" style="background:rgba(251,191,36,0.65);"></span> Moderate
+  <span class="heat-legend-swatch" style="background:rgba(251,146,60,0.75);"></span> Heavy
+  <span class="heat-legend-swatch" style="background:rgba(248,113,113,0.85);"></span> Overwhelming
+</div>
+
+<div class="cal-day-headers">
+  {% for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] %}
+  <div class="cal-day-header">{{ d }}</div>
+  {% endfor %}
+</div>
+
 {% set week_labels = ["This Week", "Next Week", "Week 3", "Week 4"] %}
 
 {% for week in weeks %}
-<div class="cal-week-label">{{ week_labels[loop.index0] }}</div>
+<div class="cal-week-row">
+  <div class="cal-week-label">{{ week_labels[loop.index0] }}</div>
+  {% if week.week_total_hours > 0 %}
+  <div class="cal-week-total">~{{ week.week_total_hours }}h of work</div>
+  {% endif %}
+</div>
+
 <div class="cal-grid">
-  {% for day in week %}
-  <div class="cal-cell {% if day.is_today %}today{% endif %}">
-    <div class="cal-cell-day" style="color:{% if day.is_today %}var(--accent){% else %}var(--muted){% endif %};">
-      {{ day.day_name[:3] if not day.is_today else "Today" }}
-    </div>
-    <div class="cal-cell-date">{{ day.date_str }}</div>
+  {% for day in week.days %}
+  <div class="cal-cell {% if day.is_today %}today{% elif day.is_past %}past{% endif %}">
+    <!-- Intensity bar anchored to top of cell, height encodes workload pressure -->
+    <div class="cal-intensity-bar {{ day.heat_class }}"></div>
 
-    {% if day.assignments or day.exams %}
-      {% if day.total_hours %}
-      <div class="cal-hours">~{{ day.total_hours }}h</div>
+    <div class="cal-cell-body">
+      <div class="cal-cell-day" style="color:{% if day.is_today %}var(--accent){% else %}var(--muted){% endif %};">
+        {{ day.day_name[:3] if not day.is_today else "Today" }}
+      </div>
+      <div class="cal-cell-date">{{ day.date_str }}</div>
+
+      {% if day.assignments or day.exams %}
+        {% if day.total_hours %}
+        <div class="cal-hours">~{{ day.total_hours }}h</div>
+        {% endif %}
+        {% for a in day.assignments %}
+        <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; display:block;">
+          <div class="cal-item" title="{{ a.title }}">
+            <div class="cal-dot" style="background:
+              {% if a.priority == 'critical' %}var(--red)
+              {% elif a.priority == 'high' %}var(--orange)
+              {% elif a.priority == 'medium' %}var(--yellow)
+              {% else %}var(--green){% endif %};"></div>
+            <span style="overflow:hidden;text-overflow:ellipsis;">{{ a.title[:22] }}{% if a.title|length > 22 %}…{% endif %}</span>
+          </div>
+        </a>
+        {% endfor %}
+        {% for e in day.exams %}
+        <div class="cal-exam" title="{{ e.title }}">★ {{ e.title[:20] }}{% if e.title|length > 20 %}…{% endif %}</div>
+        {% endfor %}
+      {% else %}
+        {% if day.contributors %}
+          {% for c in day.contributors %}
+          <div class="cal-contributor" title="{{ c.title }}">
+            {% if c.type == 'exam' %}★ study{% else %}→ start{% endif %}
+            {{ c.title[:16] }}{% if c.title|length > 16 %}…{% endif %}
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="cal-empty">clear</div>
+        {% endif %}
       {% endif %}
-
-      {% for a in day.assignments %}
-      <a href="/assignments/{{ a.id }}" style="text-decoration:none; color:inherit; display:block;">
-        <div class="cal-item" title="{{ a.title }}">
-          <div class="cal-dot" style="background:
-            {% if a.priority == 'critical' %}var(--red)
-            {% elif a.priority == 'high' %}var(--orange)
-            {% elif a.priority == 'medium' %}var(--yellow)
-            {% else %}var(--green){% endif %};"></div>
-          <span style="overflow:hidden;text-overflow:ellipsis;">{{ a.title[:22] }}{% if a.title|length > 22 %}…{% endif %}</span>
-        </div>
-      </a>
-      {% endfor %}
-
-      {% for e in day.exams %}
-      <div class="cal-exam" title="{{ e.title }}">★ {{ e.title[:20] }}{% if e.title|length > 20 %}…{% endif %}</div>
-      {% endfor %}
-    {% else %}
-      <div class="cal-empty">clear</div>
-    {% endif %}
+    </div>
   </div>
   {% endfor %}
 </div>

@@ -50,7 +50,7 @@ def get_assignments(course_id):
     try:
         assignments = _get(f"{BASE}/api/v1/courses/{course_id}/assignments", params={
             "per_page": 50,
-            "include[]": ["submission"],
+            "include[]": ["submission", "rubric"],
             "order_by": "due_at"
         })
         return assignments if isinstance(assignments, list) else []
@@ -63,7 +63,6 @@ def get_course_files(course_id):
     try:
         files = _get(f"{BASE}/api/v1/courses/{course_id}/files", params={
             "per_page": 50,
-            "content_types[]": ["application/pdf", "text/html"]
         })
         return files if isinstance(files, list) else []
     except Exception as e:
@@ -134,4 +133,68 @@ def get_calendar_events(course_ids):
 
 def is_syllabus_file(filename: str) -> bool:
     name = filename.lower()
-    return "syllabus" in name or "syllab" in name or "course_info" in name or "course info" in name
+    keywords = ["syllabus", "syllab", "course_info", "course info", "course overview",
+                "course_overview", "class overview", "course guide", "course schedule",
+                "course outline", "course_schedule", "class info"]
+    return any(kw in name for kw in keywords)
+
+def get_course_syllabus_body(course_id) -> str:
+    """Fetch the Canvas built-in syllabus HTML for a course."""
+    try:
+        data = _get(f"{BASE}/api/v1/courses/{course_id}", params={"include[]": "syllabus_body"})
+        return data.get("syllabus_body") or "" if isinstance(data, dict) else ""
+    except Exception as e:
+        logger.error(f"Failed to fetch syllabus body for course {course_id}: {e}")
+        return ""
+
+def get_course_submissions(course_id):
+    """Get all graded submissions for the current user in a course."""
+    try:
+        subs = _get(f"{BASE}/api/v1/courses/{course_id}/students/submissions", params={
+            "student_ids[]": "self",
+            "include[]": ["assignment"],
+            "per_page": 100,
+        })
+        return [s for s in (subs if isinstance(subs, list) else [])
+                if s.get("score") is not None and s.get("assignment_id")]
+    except Exception as e:
+        logger.error(f"Failed to fetch submissions for course {course_id}: {e}")
+        return []
+
+def get_course_current_grade(course_id):
+    """Get current overall score % for the student in this course."""
+    try:
+        enrollments = _get(f"{BASE}/api/v1/courses/{course_id}/enrollments", params={
+            "user_id": "self",
+            "per_page": 5,
+        })
+        for e in (enrollments if isinstance(enrollments, list) else []):
+            if e.get("type") == "StudentEnrollment":
+                g = e.get("grades", {})
+                return g.get("current_score")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch course grade for {course_id}: {e}")
+        return None
+
+def get_announcements(course_id, per_page=10):
+    """Return recent announcements for a course."""
+    try:
+        items = _get(f"{BASE}/api/v1/courses/{course_id}/discussion_topics", params={
+            "only_announcements": "true",
+            "per_page": per_page,
+            "order_by": "recent_activity"
+        })
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        logger.error(f"Failed to fetch announcements for course {course_id}: {e}")
+        return []
+
+def get_assignment_groups(course_id):
+    """Return assignment groups with weights for a course."""
+    try:
+        groups = _get(f"{BASE}/api/v1/courses/{course_id}/assignment_groups", params={"per_page": 50})
+        return groups if isinstance(groups, list) else []
+    except Exception as e:
+        logger.error(f"Failed to fetch assignment groups for course {course_id}: {e}")
+        return []

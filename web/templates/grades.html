@@ -1,0 +1,320 @@
+{% extends "base.html" %}
+{% block title %} — Grades{% endblock %}
+
+{% block head %}
+<style>
+  .grade-course-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .grade-course-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+  }
+  .grade-course-name { font-size: 16px; font-weight: 600; }
+  .grade-course-code { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .grade-big {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .grade-letter {
+    font-size: 18px;
+    font-weight: 700;
+    margin-left: 8px;
+  }
+  .grade-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .grade-bar-wrap { margin: 12px 0; }
+  .grade-bar {
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .grade-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.4s;
+  }
+  .grade-bar-target {
+    position: absolute;
+    top: -2px;
+    height: 12px;
+    width: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+  }
+  .grade-stats-row {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .grade-stat { }
+  .grade-stat-val { font-weight: 600; }
+  .grade-stat-label { color: var(--muted); font-size: 11px; }
+  .need-score {
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    margin-top: 8px;
+    display: inline-block;
+  }
+  .need-easy { background: rgba(74,222,128,0.1); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+  .need-medium { background: rgba(251,191,36,0.1); color: var(--yellow); border: 1px solid rgba(251,191,36,0.2); }
+  .need-hard { background: rgba(248,113,113,0.1); color: var(--red); border: 1px solid rgba(248,113,113,0.2); }
+  .need-impossible { background: rgba(248,113,113,0.2); color: var(--red); border: 1px solid rgba(248,113,113,0.4); font-weight: 700; }
+  .recent-grades { margin-top: 12px; }
+  .recent-grade-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .recent-grade-row:last-child { border-bottom: none; }
+  .goal-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    width: 60px;
+    text-align: center;
+  }
+  .goal-input:focus { outline: none; border-color: var(--accent); }
+  .on-track { color: var(--green); font-size: 12px; font-weight: 600; }
+  .off-track { color: var(--red); font-size: 12px; font-weight: 600; }
+  .no-grade-yet { color: var(--muted); font-size: 13px; font-style: italic; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Grades</h1>
+<p class="subtitle">Live from Canvas — syncs with each Canvas update</p>
+
+{% if not course_summaries or course_summaries | selectattr('current_avg') | list | length == 0 %}
+<div class="card" style="padding:32px; text-align:center;">
+  {% if auto_syncing %}
+  <div style="font-size:18px; margin-bottom:8px; color:var(--accent);">Syncing grades from Canvas...</div>
+  <div style="font-size:13px; color:var(--muted);">Hermes is pulling your latest grades now. Refresh in a moment.</div>
+  {% else %}
+  <div style="font-size:18px; margin-bottom:8px; color:var(--muted);">No grade data yet.</div>
+  <div style="font-size:13px; color:var(--muted);">Grades sync automatically at 2PM and 8PM daily.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% for c in course_summaries %}
+<div class="grade-course-card" data-avg="{{ c.current_avg or 0 }}">
+  <div class="grade-course-header">
+    <div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div class="grade-course-name">{{ c.name }}</div>
+        {% if c.health_color and c.health_color != 'muted' %}
+        <span title="{{ c.health_reason }}"
+              style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--{{ c.health_color }}); flex-shrink:0;"></span>
+        <span style="font-size:11px; color:var(--{{ c.health_color }}); font-weight:600;">{{ c.health_label }}</span>
+        {% endif %}
+      </div>
+      <div class="grade-course-code">{{ c.code }}</div>
+      {% if c.total_asgn_count > 0 %}
+      <div style="font-size:11px; color:var(--muted); margin-top:3px;">
+        {{ c.submitted_count }}/{{ c.total_asgn_count }} assignments graded
+      </div>
+      {% endif %}
+    </div>
+    <div style="text-align:right;">
+      {% if c.current_avg is not none %}
+      <div>
+        <span class="grade-big" style="color:var(--{{ c.color }})">{{ c.current_avg }}%</span>
+        <span class="grade-letter" style="color:var(--{{ c.color }})">{{ c.letter }}</span>
+      </div>
+      <div class="grade-meta">
+        {% if c.canvas_grade %}from Canvas{% elif c.graded_count %}{{ c.graded_count }} graded{% endif %}
+        &nbsp;·&nbsp;
+        {% if c.on_track %}<span class="on-track">On track for target</span>
+        {% else %}<span class="off-track">Below target</span>{% endif %}
+        {% if c.trend %}
+        &nbsp;·&nbsp;
+        <span style="color:var(--{{ c.trend_color }}); font-weight:600;" title="Grade trend based on assignment scores over time">{{ c.trend_icon }} {{ c.trend }}</span>
+        {% endif %}
+      </div>
+      {% else %}
+      <div class="no-grade-yet">No grades yet</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if c.current_avg is not none %}
+  <!-- Grade progress bar -->
+  <div class="grade-bar-wrap">
+    <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-bottom:4px;">
+      <span>0%</span>
+      <span style="color:var(--accent)">Target: {{ c.target }}%</span>
+      <span>100%</span>
+    </div>
+    <div class="grade-bar">
+      <div class="grade-bar-fill" style="width:{% if c.current_avg > 100 %}100{% else %}{{ c.current_avg }}{% endif %}%; background:var(--{{ c.color }});"></div>
+      <div class="grade-bar-target" style="left:{{ c.target }}%;"></div>
+    </div>
+  </div>
+  {% endif %}
+
+
+  <div class="grade-stats-row">
+    <div class="grade-stat">
+      <div class="grade-stat-val">{{ c.graded_count }}</div>
+      <div class="grade-stat-label">Graded</div>
+    </div>
+    {% if c.current_avg is not none %}
+    <div class="grade-stat">
+      <div class="grade-stat-val">{{ c.current_avg }}%</div>
+      <div class="grade-stat-label">Current Avg</div>
+    </div>
+    {% endif %}
+    <div class="grade-stat">
+      <div class="grade-stat-label">Target</div>
+      <div style="display:flex; align-items:center; gap:6px; margin-top:2px;">
+        <input class="goal-input" type="number" min="0" max="100" value="{{ c.target }}"
+               oninput="setGoal('{{ c.id }}', this.value, this)" />
+        {% if c.ai_suggested_target %}
+        <span style="font-size:11px; color:var(--accent);" title="{{ c.ai_target_reasoning or '' }}">
+          ✦ {{ c.ai_suggested_target }}%
+        </span>
+        {% endif %}
+      </div>
+      {% if c.ai_target_reasoning %}
+      <div style="font-size:11px; color:var(--muted); margin-top:3px; max-width:200px;">{{ c.ai_target_reasoning }}</div>
+      {% endif %}
+    </div>
+    {% if c.needed_on_final is not none %}
+    <div class="grade-stat">
+      {% if c.needed_on_final > 100 %}
+      <div class="grade-stat-val" style="color:var(--red); font-size:12px;">OUT OF REACH</div>
+      {% else %}
+      <div class="grade-stat-val">{{ c.needed_on_final }}%</div>
+      {% endif %}
+      <div class="grade-stat-label">Needed on Final ({{ c.final_weight_pct }}% wt)</div>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if c.needed_on_final is not none %}
+    {% set nof = c.needed_on_final %}
+    {% if nof <= 70 %}
+    <div class="need-score need-easy">You need {{ nof }}% on the final to hit your {{ c.target }}% goal — very achievable.</div>
+    {% elif nof <= 85 %}
+    <div class="need-score need-medium">You need {{ nof }}% on the final — solid study effort required.</div>
+    {% elif nof <= 100 %}
+    <div class="need-score need-hard">You need {{ nof }}% on the final — time to get serious.</div>
+    {% else %}
+    <div class="need-score need-impossible">{{ c.target }}% is out of reach — even a perfect final won't get you there. Lower your target or focus on extra credit opportunities.</div>
+    {% endif %}
+  {% endif %}
+
+  {% if c.projected_optimistic is not none or c.projected_realistic is not none %}
+  <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; margin-bottom:4px;">
+    {% if c.projected_optimistic is not none %}
+    <div style="flex:1; min-width:160px; background:rgba(74,222,128,0.06); border:1px solid rgba(74,222,128,0.2); border-radius:8px; padding:10px 14px;">
+      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:4px;">If you ace everything remaining</div>
+      <div style="font-size:22px; font-weight:700; color:var(--green);">{{ c.projected_optimistic }}%</div>
+      <div style="font-size:11px; color:var(--muted);">{{ letter_grade(c.projected_optimistic) }} — optimistic ceiling</div>
+    </div>
+    {% endif %}
+    {% if c.projected_realistic is not none %}
+    <div style="flex:1; min-width:160px; background:rgba(251,191,36,0.06); border:1px solid rgba(251,191,36,0.2); border-radius:8px; padding:10px 14px;">
+      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:4px;">If you maintain current pace</div>
+      <div style="font-size:22px; font-weight:700; color:var(--yellow);">{{ c.projected_realistic }}%</div>
+      <div style="font-size:11px; color:var(--muted);">{{ letter_grade(c.projected_realistic) }} — realistic projection</div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if c.patterns %}
+  {% for p in c.patterns %}
+  <div style="font-size:12px; color:var(--muted); border-left:3px solid var(--accent); padding-left:10px; margin:6px 0;">{{ p }}</div>
+  {% endfor %}
+  {% endif %}
+
+  {% if c.category_grades %}
+  <div class="recent-grades">
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Grade Breakdown</div>
+    {% for cat in c.category_grades %}
+    <div class="recent-grade-row">
+      <span>{{ cat.name }} <span style="color:var(--muted); font-size:11px;">({{ cat.weight|int }}%)</span></span>
+      <span style="display:flex; align-items:center; gap:8px;">
+        {% if cat.current_pct is not none %}
+        <span style="font-weight:600; color:{% if cat.current_pct >= 90 %}var(--green){% elif cat.current_pct >= 80 %}var(--yellow){% else %}var(--red){% endif %};">{{ cat.current_pct }}%</span>
+        <span style="color:var(--muted); font-size:11px;">{{ cat.graded_count }}/{{ cat.total_count }} graded</span>
+        {% else %}
+        <span style="color:var(--muted); font-style:italic; font-size:11px;">Not yet graded</span>
+        {% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# Weakest category callout — shown in orange when there's a graded weak spot #}
+  {% if c.weakest_category and c.weakest_category.pct is not none and c.weakest_category.pct < 80 %}
+  <div style="margin-top:10px; padding:8px 12px; border-radius:8px; background:rgba(251,146,60,0.08); border:1px solid rgba(251,146,60,0.25); font-size:12px; color:var(--orange);">
+    Weakest area: <strong>{{ c.weakest_category.name }}</strong>
+    ({{ c.weakest_category.pct }}% avg, {{ c.weakest_category.weight|int }}% of grade)
+    — focus here to move your overall grade.
+  </div>
+  {% endif %}
+
+  {# What-if: single best ungraded assignment to boost overall grade #}
+  {% if c.what_if and c.on_track is sameas false %}
+  <div style="margin-top:8px; padding:8px 12px; border-radius:8px; background:rgba(139,92,246,0.06); border:1px solid rgba(139,92,246,0.2); font-size:12px; color:var(--accent);">
+    If you score 95% on <strong>{{ c.what_if.title }}</strong>
+    (+{{ c.what_if.impact }}%), you'd reach <strong>{{ c.what_if.projected }}%</strong>.
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<script>
+async function setGoal(courseId, target, inputEl) {
+  target = parseFloat(target);
+  if (isNaN(target)) return;
+  // Update target marker on bar
+  const card = inputEl.closest('.grade-course-card');
+  if (card) {
+    const marker = card.querySelector('.grade-bar-target');
+    if (marker) marker.style.left = Math.min(target, 100) + '%';
+    // Update on-track indicator
+    const avg = parseFloat(card.dataset.avg);
+    const onTrackEl = card.querySelector('.on-track, .off-track');
+    if (onTrackEl && !isNaN(avg)) {
+      if (avg >= target) {
+        onTrackEl.className = 'on-track';
+        onTrackEl.textContent = 'On track for target';
+      } else {
+        onTrackEl.className = 'off-track';
+        onTrackEl.textContent = 'Below target';
+      }
+    }
+  }
+  // Persist to server (debounced)
+  clearTimeout(inputEl._saveTimer);
+  inputEl._saveTimer = setTimeout(async () => {
+    await fetch(`/api/grade-goal/${courseId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target})
+    });
+  }, 600);
+}
+</script>
+{% endblock %}

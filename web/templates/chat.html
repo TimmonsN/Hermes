@@ -32,8 +32,18 @@
 {% endblock %}
 
 {% block content %}
+{% if assignment_context %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center;">
+  <div>
+    <div style="font-size:13px; font-weight:600; color:var(--text);">{{ assignment_context.title }}</div>
+    <div style="font-size:11px; color:var(--muted); margin-top:2px;">{{ assignment_context.course_name }} · Due {{ assignment_context.due_fmt or 'unknown' }}</div>
+  </div>
+  <a href="/assignments/{{ assignment_context.id }}" style="font-size:11px; color:var(--accent);">← Back to assignment</a>
+</div>
+{% else %}
 <h1>Chat with Hermes</h1>
 <p class="subtitle">Ask about assignments, get help, give status updates. Hermes knows your full schedule.</p>
+{% endif %}
 
 <div class="chat-container">
   <div class="chat-messages" id="messages">
@@ -47,7 +57,7 @@
     {% if not messages %}
     <div class="msg msg-hermes">
       <div class="msg-label">Hermes</div>
-      <div class="msg-bubble">Hey Niko — I'm Hermes. Ask me about your assignments, tell me what you're working on, or ask for help with anything. What's up?</div>
+      <div class="msg-bubble">Hey — what's up?</div>
     </div>
     {% endif %}
   </div>
@@ -111,6 +121,8 @@
     if (t) t.remove();
   }
 
+  const ASSIGNMENT_ID = {{ ('"' + assignment_context.id|string + '"') if assignment_context else 'null' }};
+
   async function sendMessage() {
     const body = input.value.trim();
     if (!body) return;
@@ -122,11 +134,14 @@
     appendMsg('user', body);
     showTyping();
 
+    const payload = {message: body};
+    if (ASSIGNMENT_ID) payload.assignment_id = ASSIGNMENT_ID;
+
     try {
       const res = await fetch('/chat/send', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: body})
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       removeTyping();

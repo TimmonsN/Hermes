@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %} — ROI Radar{% endblock %}
+
+{% block head %}
+<style>
+  .roi-section { margin-bottom: 32px; }
+  .roi-section h2 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .roi-section .section-desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .roi-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+  }
+  .roi-row:last-child { border-bottom: none; }
+  .roi-title { font-size: 13px; font-weight: 500; }
+  .roi-course { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .roi-impact {
+    font-size: 20px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .roi-meta { font-size: 11px; color: var(--muted); text-align: right; margin-top: 1px; }
+  .roi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+  .empty-state { color: var(--muted); font-size: 13px; font-style: italic; padding: 8px 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>ROI Radar</h1>
+<p class="subtitle">Every lever available to improve your grades — by any means necessary.</p>
+
+<!-- Resubmissions -->
+<div class="roi-section">
+  <h2>♻ Resubmission Opportunities</h2>
+  <p class="section-desc">Assignments you already submitted that can be improved — free points you've already paid for with your time.</p>
+  <div class="roi-card">
+    {% if resub_ops %}
+    {% for r in resub_ops %}
+    <div class="roi-row">
+      <div>
+        <div class="roi-title">
+          {% if r.html_url %}<a href="{{ r.html_url }}" target="_blank" style="color:var(--text); text-decoration:none;">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}
+          &nbsp;<a href="/assignments/{{ r.id }}" style="font-size:11px; color:var(--accent);">details</a>
+        </div>
+        <div class="roi-course">{{ r.course_name }}</div>
+        {% if r.resubmit_details %}
+        <div style="font-size:11px; color:var(--muted); margin-top:3px; font-style:italic;">{{ r.resubmit_details }}</div>
+        {% endif %}
+      </div>
+      <div>
+        <div class="roi-impact" style="color:var(--green);">
+          {% if r.grade_impact %}+{{ r.grade_impact }}%{% else %}—{% endif %}
+          <span style="font-size:13px; font-weight:400; color:var(--muted);">final</span>
+        </div>
+        <div class="roi-meta">
+          current: {{ r.current_pct }}% ({{ r.points_earned }}/{{ r.points_possible }} pts)
+        </div>
+        <div class="roi-meta" style="color:var(--green);">
+          can recover up to +{{ (r.points_possible - r.points_earned)|round(1) }} pts
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty-state">No resubmission opportunities found. Either your courses don't allow resubmission or you're already at full marks.</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Extra Credit -->
+<div class="roi-section">
+  <h2>⭐ Extra Credit</h2>
+  <p class="section-desc">Bonus points that aren't required — but every point counts toward the goal.</p>
+
+  {% if ec_independent %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--green); margin-bottom:6px;">Do Now — Complete Independently</div>
+  <div class="roi-card" style="margin-bottom:12px;">
+    {% for r in ec_independent %}
+    <div class="roi-row">
+      <div>
+        <div class="roi-title">
+          {% if r.html_url %}<a href="{{ r.html_url }}" target="_blank" style="color:var(--text); text-decoration:none;">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}
+          &nbsp;<a href="/assignments/{{ r.id }}" style="font-size:11px; color:var(--accent);">details</a>
+        </div>
+        <div class="roi-course">{{ r.course_name }}</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+          {% if r.est_hours %}~{{ r.est_hours }}h{% endif %}
+          {% if r.due_fmt %}&nbsp;·&nbsp;<span class="{{ r.due_class }}">Due {{ r.due_fmt }}</span>{% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="roi-impact" style="color:var(--accent);">
+          {% if r.grade_impact %}+{{ r.grade_impact }}%{% else %}+{{ r.points_possible }}pts{% endif %}
+        </div>
+        <div class="roi-meta">{{ r.points_possible }} pts available</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if ec_activity %}
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:6px;">Other Opportunities — Requires Class/Event Attendance</div>
+  <div class="roi-card" style="margin-bottom:4px;">
+    <div style="font-size:11px; color:var(--muted); margin-bottom:10px; font-style:italic;">These require attending class activities or events — keep them in mind when you're there.</div>
+    {% for r in ec_activity %}
+    <div class="roi-row">
+      <div>
+        <div class="roi-title">
+          {% if r.html_url %}<a href="{{ r.html_url }}" target="_blank" style="color:var(--text); text-decoration:none;">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}
+          &nbsp;<a href="/assignments/{{ r.id }}" style="font-size:11px; color:var(--accent);">details</a>
+        </div>
+        <div class="roi-course">{{ r.course_name }}</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+          {% if r.due_fmt %}<span class="{{ r.due_class }}">Due {{ r.due_fmt }}</span>{% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="roi-impact" style="color:var(--muted);">
+          {% if r.grade_impact %}+{{ r.grade_impact }}%{% else %}+{{ r.points_possible }}pts{% endif %}
+        </div>
+        <div class="roi-meta">{{ r.points_possible }} pts available</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if not ec_independent and not ec_activity %}
+  <div class="roi-card">
+    <div class="empty-state">No extra credit opportunities detected.</div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Skip candidates -->
+<div class="roi-section">
+  <h2>⚖ Time vs Grade Impact</h2>
+  <p class="section-desc">Assignments with poor effort-to-grade-impact ratio. Knowing when something isn't worth the time is part of the strategy.</p>
+  <div class="roi-card">
+    {% if skip_candidates %}
+    {% for r in skip_candidates %}
+    <div class="roi-row">
+      <div>
+        <div class="roi-title">
+          <a href="/assignments/{{ r.id }}" style="color:var(--text); text-decoration:none;">{{ r.title }}</a>
+        </div>
+        <div class="roi-course">{{ r.course_name }}</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+          ~{{ r.est_hours }}h work&nbsp;·&nbsp;<span class="{{ r.due_class }}">Due {{ r.due_fmt }}</span>
+        </div>
+      </div>
+      <div>
+        <div class="roi-impact" style="color:var(--muted);">{{ r.grade_impact }}%</div>
+        <div class="roi-meta">final grade impact</div>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty-state">All upcoming assignments have reasonable grade impact for their effort.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
