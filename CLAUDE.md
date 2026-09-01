@@ -50,6 +50,11 @@ change gets measured against.
 Assignment data flows: Canvas sync → AI analysis against syllabus-derived
 rules → SQLite → dashboard and notifications.
 
+## Current work
+
+See `HANDOFF.md` for the active working state — open threads, known bugs with
+file references, and setup steps that have not been completed yet.
+
 ## Conventions
 
 - Secrets live only in `.env` (git-ignored). Never commit tokens or keys, and
